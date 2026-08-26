@@ -21,11 +21,11 @@ _ENV_MAP = {
     "OBJECT_STORAGE_ENDPOINT": ("object_storage.endpoint", str),
     "OBJECT_STORAGE_ACCESS_KEY": ("object_storage.access_key", str),
     "OBJECT_STORAGE_SECRET_KEY": ("object_storage.secret_key", str),
-    "MODEL_OPENAPI_ENDPOINT": ("model_openai.endpoint", str),
-    "MODEL_OPENAPI_CLIENT_KEY": ("model_openai.client_key", str),
-    "MODEL_OPENAPI_PASS_KEY": ("model_openai.pass_key", str),
-    "MODEL_OPENAPI_ROOT_MODEL_ID": ("model_openai.root_model_id", str),
-    "MODEL_OPENAPI_SYSTEM_MODEL_ID": ("model_openai.system_model_id", str)
+    "MODEL_OPENAPI_ENDPOINT": ("model_openapi.endpoint", str),
+    "MODEL_OPENAPI_CLIENT_KEY": ("model_openapi.client_key", str),
+    "MODEL_OPENAPI_PASS_KEY": ("model_openapi.pass_key", str),
+    "MODEL_OPENAPI_ROOT_MODEL_ID": ("model_openapi.root_model_id", int),
+    "MODEL_OPENAPI_SYSTEM_MODEL_ID": ("model_openapi.system_model_id", int)
 }
 
 

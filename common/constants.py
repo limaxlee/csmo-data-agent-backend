@@ -17,3 +17,7 @@ FILENAME_PREFIX = "[Filename of the uploaded file]"
 CONTENT_TYPE = "[Content type of the uploaded file]"
 
 MILVUS_IMAGE_SEARCH_TOOL = "mcp_milvus_extract_embeddings_and_vector_search"
+
+HEALTHY_STATUS = "healthy"
+UNHEALTHY_STATUS = "unhealthy"
+HEALTH_CHECK_TIMEOUT = 5

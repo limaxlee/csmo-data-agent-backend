@@ -5,16 +5,21 @@ from contextlib import asynccontextmanager
 
 from common.config import SETTINGS
 from data_agent.routers import router
+from data_agent.runners import RootAgentRunner, SystemAgentRunner
+from data_agent.storage import ObjectStorage, OSArtifactService
 from data_agent.utils import initialize_logger, shutdown_logs_executor
-from data_agent.dependencies import get_agent_runner, get_db_session_service, get_object_storage
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    object_storage = get_object_storage()
+    object_storage = ObjectStorage()
     await object_storage.connect()
 
-    get_db_session_service()
-    get_agent_runner()
+    app.state.object_storage = object_storage
+    app.state.agent_runner = RootAgentRunner(
+        artifact_service=OSArtifactService(storage=object_storage),
+        system_runner=SystemAgentRunner(),
+        # object_storage=object_storage
+    )
     try:
         yield
     finally:

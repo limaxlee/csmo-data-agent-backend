@@ -3,7 +3,7 @@ from typing import Optional, Union, Any
 from google.adk.artifacts import BaseArtifactService
 from google.genai import types
 
-from data_agent.storage import ObjectStorage
+from data_agent.storage.object_storage import ObjectStorage
 
 logger = logging.getLogger(__name__)
 

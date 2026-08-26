@@ -1,0 +1,288 @@
+import asyncio
+
+import pytest
+
+from common.constants import DATA_URI_PREFIX, SESSION_TITLE_KEY, SYSTEM_AUTHOR
+from data_agent.runners import RootAgentRunner
+from data_agent.schemas import RenameSessionRequest, RunAgentRequest
+
+
+def _build_event(mocker, author, texts):
+    event = mocker.MagicMock()
+    event.author = author
+    if texts is None:
+        event.content = None
+    else:
+        event.content = mocker.MagicMock()
+        event.content.parts = [mocker.MagicMock(text=text) for text in texts]
+    return event
+
+
+class TestRootAgentRunner:
+    @pytest.fixture
+    def agent_runner(self, mocker):
+        # DatabaseSessionService opens a real engine against PostgreSQL, so it never
+        # reaches the constructor in a test.
+        session_service = mocker.MagicMock()
+        adk_runner = mocker.MagicMock()
+        mocker.patch("data_agent.runners.root_agent.DatabaseSessionService", return_value=session_service)
+        mocker.patch("data_agent.runners.root_agent.Runner", return_value=adk_runner)
+
+        return RootAgentRunner(
+            artifact_service=mocker.MagicMock(),
+            system_runner=mocker.MagicMock()
+        )
+
+    def test__find_last_user_message(self, mocker, agent_runner):
+        session = mocker.MagicMock()
+        session.events = [
+            _build_event(mocker, "user", ["first question"]),
+            _build_event(mocker, "model", ["an answer"]),
+            _build_event(mocker, "user", ["ignored", "   "]),
+        ]
+
+        # Scans backwards, skips non-user authors, and ignores blank parts.
+        assert agent_runner._find_last_user_message(session) == "ignored"
+
+        session.events = [
+            _build_event(mocker, "model", ["an answer"]),
+            _build_event(mocker, "user", None),
+        ]
+        assert agent_runner._find_last_user_message(session) is None
+
+        session.events = []
+        assert agent_runner._find_last_user_message(session) is None
+
+    def test__set_title(self, mocker, agent_runner):
+        agent_runner._session_service.append_event = mocker.AsyncMock()
+        session = mocker.MagicMock()
+
+        asyncio.run(agent_runner._set_title(session, "Monthly sales"))
+
+        agent_runner._session_service.append_event.assert_awaited_once()
+        appended_session, appended_event = agent_runner._session_service.append_event.await_args.args
+        assert appended_session is session
+        assert appended_event.author == SYSTEM_AUTHOR
+        assert appended_event.actions.state_delta == {SESSION_TITLE_KEY: "Monthly sales"}
+
+    def test__upload_artifact(self, mocker, agent_runner):
+        image_file = mocker.MagicMock(filename="chart.png", content_type="image/png")
+        image_file.read = mocker.AsyncMock(return_value=b"image bytes")
+        agent_runner._artifact_service.save_artifact = mocker.AsyncMock(return_value=2)
+        agent_runner._artifact_service.get_object_key = mocker.MagicMock(return_value="data_agent/u/s/chart.png/2")
+
+        data_uri = asyncio.run(agent_runner._upload_artifact(
+            user_id="user-1",
+            session_id="session-1",
+            image_file=image_file
+        ))
+
+        assert data_uri == "data_agent/u/s/chart.png/2"
+        assert agent_runner._artifact_service.save_artifact.await_args.kwargs["filename"] == "chart.png"
+        assert agent_runner._artifact_service.get_object_key.call_args.kwargs["version"] == 2
+
+        # Upload errors propagate so the caller can fail the run.
+        image_file.read = mocker.AsyncMock(side_effect=Exception("boom"))
+        with pytest.raises(Exception, match="boom"):
+            asyncio.run(agent_runner._upload_artifact(
+                user_id="user-1",
+                session_id="session-1",
+                image_file=image_file
+            ))
+
+    def test_list_sessions(self, mocker, agent_runner):
+        session = mocker.MagicMock(
+            id="session-1",
+            app_name="data_agent",
+            user_id="user-1",
+            state={SESSION_TITLE_KEY: "Monthly sales"},
+            events=[],
+            last_update_time=1700000000.0
+        )
+        agent_runner._session_service.list_sessions = mocker.AsyncMock(
+            return_value=mocker.MagicMock(sessions=[session])
+        )
+
+        result = asyncio.run(agent_runner.list_sessions(user_id="user-1"))
+
+        assert len(result.sessions) == 1
+        assert result.sessions[0].session_id == "session-1"
+        assert result.sessions[0].state == {SESSION_TITLE_KEY: "Monthly sales"}
+        assert result.sessions[0].last_update_time.timestamp() == 1700000000.0
+
+        agent_runner._session_service.list_sessions = mocker.AsyncMock(side_effect=Exception("boom"))
+        with pytest.raises(Exception, match="boom"):
+            asyncio.run(agent_runner.list_sessions(user_id="user-1"))
+
+    def test_create_session(self, mocker, agent_runner):
+        agent_runner._session_service.create_session = mocker.AsyncMock(
+            return_value=mocker.MagicMock(id="session-1")
+        )
+
+        result = asyncio.run(agent_runner.create_session(user_id="user-1"))
+
+        assert result.session_id == "session-1"
+        # The id is generated backend-side as a uuid4 hex.
+        generated_id = agent_runner._session_service.create_session.await_args.kwargs["session_id"]
+        assert len(generated_id) == 32
+        assert agent_runner._session_service.create_session.await_args.kwargs["user_id"] == "user-1"
+
+    def test_create_session_title(self, mocker, agent_runner):
+        session = mocker.MagicMock()
+        session.events = [_build_event(mocker, "user", ["How many orders last month?"])]
+        agent_runner._session_service.get_session = mocker.AsyncMock(return_value=session)
+        agent_runner._system_runner.create_session_title = mocker.AsyncMock(return_value="Monthly sales")
+        set_title = mocker.patch.object(agent_runner, "_set_title", new=mocker.AsyncMock())
+
+        result = asyncio.run(agent_runner.create_session_title(user_id="user-1", session_id="session-1"))
+
+        assert result.session_title == "Monthly sales"
+        # With no explicit message it falls back to the last user message in the session.
+        assert agent_runner._system_runner.create_session_title.await_args.kwargs["user_message"] == (
+            "How many orders last month?"
+        )
+        set_title.assert_awaited_once_with(session, "Monthly sales")
+
+        # An explicit message wins over the session history.
+        asyncio.run(agent_runner.create_session_title(
+            user_id="user-1",
+            session_id="session-1",
+            user_message="explicit"
+        ))
+        assert agent_runner._system_runner.create_session_title.await_args.kwargs["user_message"] == "explicit"
+
+        session.events = []
+        with pytest.raises(ValueError, match="has no user message"):
+            asyncio.run(agent_runner.create_session_title(user_id="user-1", session_id="session-1"))
+
+        agent_runner._session_service.get_session = mocker.AsyncMock(return_value=None)
+        with pytest.raises(ValueError, match="does not have session"):
+            asyncio.run(agent_runner.create_session_title(user_id="user-1", session_id="session-1"))
+
+    def test_rename_session_title(self, mocker, agent_runner):
+        session = mocker.MagicMock()
+        agent_runner._session_service.get_session = mocker.AsyncMock(return_value=session)
+        set_title = mocker.patch.object(agent_runner, "_set_title", new=mocker.AsyncMock())
+
+        asyncio.run(agent_runner.rename_session_title(
+            user_id="user-1",
+            session_id="session-1",
+            request=RenameSessionRequest(session_title="Renamed")
+        ))
+
+        set_title.assert_awaited_once_with(session, "Renamed")
+
+        agent_runner._session_service.get_session = mocker.AsyncMock(return_value=None)
+        with pytest.raises(ValueError, match="does not have session"):
+            asyncio.run(agent_runner.rename_session_title(
+                user_id="user-1",
+                session_id="session-1",
+                request=RenameSessionRequest(session_title="Renamed")
+            ))
+
+    def test_get_session(self, mocker, agent_runner):
+        event = mocker.MagicMock()
+        event.timestamp = 1700000000.0
+        session = mocker.MagicMock(
+            id="session-1",
+            app_name="data_agent",
+            user_id="user-1",
+            state={},
+            events=[event],
+            last_update_time=1700000001.0
+        )
+        agent_runner._session_service.get_session = mocker.AsyncMock(return_value=session)
+
+        result = asyncio.run(agent_runner.get_session(user_id="user-1", session_id="session-1"))
+
+        assert result.session_id == "session-1"
+        assert result.last_update_time.timestamp() == 1700000001.0
+        # Event timestamps are rewritten from unix floats to datetimes in place.
+        assert event.timestamp.timestamp() == 1700000000.0
+
+        agent_runner._session_service.get_session = mocker.AsyncMock(return_value=None)
+        with pytest.raises(ValueError, match="does not have session"):
+            asyncio.run(agent_runner.get_session(user_id="user-1", session_id="session-1"))
+
+    def test_delete_session(self, mocker, agent_runner):
+        agent_runner._session_service.delete_session = mocker.AsyncMock()
+
+        asyncio.run(agent_runner.delete_session(user_id="user-1", session_id="session-1"))
+
+        assert agent_runner._session_service.delete_session.await_args.kwargs["session_id"] == "session-1"
+        assert agent_runner._session_service.delete_session.await_args.kwargs["user_id"] == "user-1"
+
+        agent_runner._session_service.delete_session = mocker.AsyncMock(side_effect=Exception("boom"))
+        with pytest.raises(Exception, match="boom"):
+            asyncio.run(agent_runner.delete_session(user_id="user-1", session_id="session-1"))
+
+    def test_run(self, mocker, agent_runner):
+        final_event = mocker.MagicMock()
+        final_event.is_final_response.return_value = True
+        final_event.timestamp = 1700000000.0
+        final_event.content.parts = [mocker.MagicMock(text="42 orders")]
+
+        async def _events():
+            yield final_event
+
+        agent_runner._runner.run_async = mocker.MagicMock(side_effect=lambda **kwargs: _events())
+        create_title = mocker.patch.object(agent_runner, "create_session_title", new=mocker.AsyncMock())
+
+        result = asyncio.run(agent_runner.run(
+            user_id="user-1",
+            session_id="session-1",
+            request=RunAgentRequest(query="How many orders?")
+        ))
+
+        assert result.response == "42 orders"
+        assert result.timestamp.timestamp() == 1700000000.0
+        sent_message = agent_runner._runner.run_async.call_args.kwargs["new_message"]
+        assert sent_message.parts[0].text == "How many orders?"
+        create_title.assert_not_awaited()
+
+        # An attached image is uploaded first and its location appended to the prompt.
+        upload = mocker.patch.object(
+            agent_runner, "_upload_artifact", new=mocker.AsyncMock(return_value="data_agent/u/s/chart.png/0")
+        )
+        image_file = mocker.MagicMock(filename="chart.png", content_type="image/png")
+
+        asyncio.run(agent_runner.run(
+            user_id="user-1",
+            session_id="session-1",
+            request=RunAgentRequest(query="What is in this chart?"),
+            image_file=image_file
+        ))
+
+        upload.assert_awaited_once()
+        prompt = agent_runner._runner.run_async.call_args.kwargs["new_message"].parts[0].text
+        assert prompt.startswith("What is in this chart?")
+        assert f"{DATA_URI_PREFIX} data_agent/u/s/chart.png/0" in prompt
+        assert "chart.png" in prompt
+
+        # new_session triggers title creation once the run finishes.
+        asyncio.run(agent_runner.run(
+            user_id="user-1",
+            session_id="session-1",
+            request=RunAgentRequest(query="How many orders?", new_session=True)
+        ))
+        create_title.assert_awaited_once()
+
+        # A failing title does not break an otherwise successful run.
+        create_title_failing = mocker.patch.object(
+            agent_runner, "create_session_title", new=mocker.AsyncMock(side_effect=Exception("title boom"))
+        )
+        result = asyncio.run(agent_runner.run(
+            user_id="user-1",
+            session_id="session-1",
+            request=RunAgentRequest(query="How many orders?", new_session=True)
+        ))
+        assert result.response == "42 orders"
+        create_title_failing.assert_awaited_once()
+
+        agent_runner._runner.run_async = mocker.MagicMock(side_effect=Exception("boom"))
+        with pytest.raises(Exception, match="boom"):
+            asyncio.run(agent_runner.run(
+                user_id="user-1",
+                session_id="session-1",
+                request=RunAgentRequest(query="How many orders?")
+            ))

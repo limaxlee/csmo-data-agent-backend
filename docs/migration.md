@@ -1,7 +1,7 @@
 # Migration: turning `/run` into an asynchronous job
 
 **Audience:** backend developers, with a frontend contract section
-**Status:** plan — nothing below is implemented yet
+**Status:** implemented — the backend half is done; the frontend is being built against §8
 **Endpoint affected:** `POST /apps/users/{user_id}/sessions/{session_id}/run`
 
 ## TL;DR
@@ -9,7 +9,9 @@
 Today two `/run` calls for the same session can execute at the same time, and they corrupt each
 other's session state. The fix is to stop treating a run as an HTTP request and start treating it
 as a **job**: `POST .../run` returns `202 {run_id}` immediately, the work happens in a background
-task, and the client polls `GET /runs/{run_id}` for the result.
+task, and the client watches `GET /apps/runs/{run_id}/events` (SSE) for progress and the answer.
+`GET /apps/runs/{run_id}` returns the same record as a plain request, for reconnects and for any
+client that cannot hold a stream open.
 
 One active run per session is then enforced by a **partial unique index in Postgres**, not by
 application-level locking — so it stays correct even if the service is ever scaled to more than one
@@ -85,10 +87,11 @@ feasible once runs are jobs, and is listed as a follow-up.
 
 ## 3. Course of action
 
-### Now — stop the corruption
+### Now — stop the corruption *(skipped: the job model landed instead)*
 
-If the job migration will take more than a day, land this first as a stopgap. It is throwaway work
-once Step 1 is in, but it is an hour and it stops the bleeding.
+This was the stopgap to land first if the job migration would take more than a day. It was not
+needed — Step 1 went in directly, and the partial unique index makes the in-process busy set
+redundant. Kept here for the reasoning, not as work to do.
 
 1. A busy `set` keyed on `(app_name, user_id, session_id)` in `RootAgentRunner`, acquired before
    `run_async` and released in `finally` — **spanning the title-creation block too**, since that
@@ -209,41 +212,47 @@ SSE gotchas, since these are the ones that surprise people:
   is where you lose an afternoon.
 - **Idle timeouts kill it.** If the agent thinks for 90s without emitting, an intermediary may drop
   the connection. Send periodic `: keepalive` comment lines.
-- **`EventSource` cannot set headers.** No `Authorization: Bearer` — auth must go via cookie or
-  query parameter. Related: the CORS config pairs `allow_origins=["*"]` with
-  `allow_credentials=True`, which browsers reject outright as an invalid combination, so
-  cookie-based SSE would fail today.
+- **`EventSource` cannot set headers.** No `Authorization: Bearer` — auth would have to go via
+  cookie or query parameter. **Use `fetch` with a `ReadableStream` on the client instead**: same
+  wire format, but headers work and the problem disappears. `EventSource` also cannot POST, which
+  is a second reason submit stays its own request.
+- **The CORS config was invalid.** It paired `allow_origins=["*"]` with `allow_credentials=True`,
+  which browsers reject outright. Now fixed: origins come from `cors_origins` (env `CORS_ORIGINS`,
+  comma-separated) and credentials are only enabled once real origins are configured.
 
-**Decision: polling first.** Not as a compromise, as the correct first move:
+**Decision: SSE, with the run record as the fallback.**
 
-1. The run row in Postgres is the source of truth either way. Polling reads it directly; SSE needs
-   that *plus* an in-memory fan-out path *plus* the DB again for reconnect replay. Strictly more
-   machinery.
-2. SSE needs a polling fallback anyway, for reconnects and hostile proxies. Building the fallback
-   first means you are never blocked.
-3. ~90 requests against one primary-key lookup is nothing at this scale.
+An earlier draft of this document chose polling first, on the grounds that SSE is strictly more
+machinery and that the polling path has to exist anyway. Two things changed that:
 
-And this is not a permanent decision. The job model decouples submit from delivery — `POST /run`
-returns a `run_id` either way — so adding SSE later is a new endpoint plus a frontend swap, with no
-change to the submit contract, the table, or the manager.
+1. **The agent is moving to token streaming.** Polling cannot serve that — you would be persisting
+   partial tokens to Postgres and rendering them in 2-second chunks. This is a requirement polling
+   does not meet at any interval, not a latency preference.
+2. **The frontend had not been written yet**, so there was no migration to stage. Shipping a
+   polling loop for the client to delete a month later was pure waste.
 
-Note that polling can narrate progress too, with a cursor: persist progress events and poll
-`GET /runs/{id}/events?since=12`, trading ~2s of latency for none of the connection plumbing.
+What did *not* change is that the run row in Postgres stays the source of truth. SSE is a delivery
+layer over it, not a replacement: `GET /apps/runs/{run_id}` returns the same record and is what a
+reconnect, a hostile proxy, or a page reload falls back to. Nothing about the submit contract, the
+table, or the manager depends on which one the client uses.
+
+**What is deliberately *not* built:** streaming straight out of the open `POST /run` request with a
+`StreamingResponse` over `run_async`. It is tempting — no runs table, no job — but the client
+disconnect cancels the generator, so a page reload throws away an answer that has already been paid
+for, and the one-active-run invariant has nowhere to live. Submit and delivery stay separate.
 
 ---
 
 ## 5. Implementation steps
 
-### Step 0 — Settle the frontend contract (blocking)
+### Step 0 — Settle the frontend contract (done)
 
-Decide polling versus SSE (see above) and agree the migration path.
+Settled: SSE, per the decision above. §8 is the contract.
 
-**Recommended:** add the new endpoints alongside the existing one, and reimplement the current
-`POST .../run` as a thin wrapper that submits a job and awaits its completion. Nothing breaks on day
-one, the frontend migrates when ready, then the wrapper is deleted. Do not do a flag-day switch.
-
-This is a contract change and it is the real cost of the migration — the backend half is the easy
-half. Agree it before writing code.
+The compatibility wrapper this step originally recommended — reimplementing `POST .../run` as a
+thin wrapper that submits a job and awaits it — was **skipped**, because the frontend had not
+shipped yet. There was no live client to keep working, so `POST .../run` changed shape directly.
+Reinstate the wrapper only if a client turns out to be depending on the old `200 {response}`.
 
 ### Step 1 — Runs table and repository
 
@@ -342,6 +351,29 @@ Three details that matter:
   garbage-collected mid-flight.
 - **Wrap the run in `asyncio.timeout(...)`** for a hard maximum duration.
 
+#### Step 4b — The stream broker
+
+`data_agent/runners/run_stream.py` holds one `RunStream` per active run: a sequence counter, a ring
+buffer of recent events for replay, and a set of subscriber queues. `on_event` publishes into it;
+the SSE endpoint subscribes to it.
+
+- **Nothing is persisted.** Writing token deltas to Postgres would be absurd, and it is not needed:
+  the final answer is on the run row, and a process restart that loses the buffer also interrupts
+  the run.
+- **Replay is bounded and in-memory.** A client reconnecting with `Last-Event-ID` gets everything
+  after that sequence number that is still in the ring buffer.
+- **A slow subscriber is dropped, never waited on.** `publish` is synchronous and non-blocking; if a
+  subscriber's queue is full it gets a sentinel and its connection ends, and it reconnects with
+  `Last-Event-ID`. Agent execution must never block on a browser.
+- **Finished streams linger** for `stream_retention` seconds so a client reconnecting just after the
+  run ends still gets the tail. After that the reaper prunes them, and the endpoint falls back to
+  emitting the run record as a single `done` event.
+
+The event vocabulary is `RunEventType` in `data_agent/schemas/run.py`; §8 documents it.
+
+The title of a new session is created **before** the `done` event is published, so a client that
+refetches the session list on `done` still sees it — see the note at the end of §8.
+
 ### Step 5 — Endpoints
 
 In `data_agent/routers/runner.py`:
@@ -349,10 +381,10 @@ In `data_agent/routers/runner.py`:
 | Method | Path | Returns |
 |---|---|---|
 | `POST` | `/apps/users/{user_id}/sessions/{session_id}/run` | `202 {run_id, status}` |
-| `GET` | `/apps/runs/{run_id}` | full run record |
+| `GET` | `/apps/runs/{run_id}/events` | SSE stream — the primary delivery path |
+| `GET` | `/apps/runs/{run_id}` | full run record — the fallback |
 | `GET` | `/apps/users/{user_id}/sessions/{session_id}/active-run` | active run, or `204` |
 | `POST` | `/apps/runs/{run_id}/cancel` | `202` |
-| `GET` | `/apps/runs/{run_id}/events` *(later)* | SSE stream |
 
 Keep the existing convention: text fields are **query parameters** (`Annotated[RunAgentRequest,
 Depends()]`), and the body is reserved for the optional `image_file` multipart upload. So
@@ -413,43 +445,76 @@ heartbeats.
 
 ## 7. Build order
 
-Steps 1–2 → 3–4 → 5 with the compatibility wrapper → 6 → verify against concurrent submits → 8.
+Steps 1–2 → 3–4 → 5 → 6 → 7, with no compatibility wrapper (see Step 0).
 
-Steps 1, 5 and 6 are load-bearing; the rest is plumbing.
+**Verification still worth doing explicitly, against a real Postgres and the real model** — none of
+it is covered by the unit tests:
 
-**Verification worth doing explicitly:** fire two concurrent `POST .../run` calls at the same
-session and confirm one returns `202` and the other `409`; then kill the container mid-run and
-confirm the session becomes submittable again after the TTL.
+1. Fire two concurrent `POST .../run` calls at the same session; confirm one returns `202` and the
+   other `409 SESSION_BUSY`.
+2. Kill the container mid-run; confirm the session becomes submittable again after the startup
+   sweep, and after `heartbeat_ttl` if the process stays down.
+3. Open the SSE stream and confirm `delta` events actually arrive mid-run — that is the ADK
+   streaming assumption in §10, and it is the one thing that cannot be checked without the model.
+4. Drop the connection mid-run and reconnect with `Last-Event-ID`; confirm the replay lands and the
+   run is unaffected.
+5. Submit twice with the same `client_request_id`; confirm the second returns the *same* `run_id`
+   and not a `409`.
+6. Run it behind whatever proxy fronts it in production and confirm chunks are not buffered.
 
 ---
 
-## 8. Frontend contract summary
+## 8. Frontend contract
 
-What to bring to the Step 0 conversation:
+> Submit returns a `run_id` immediately. Open `GET /apps/runs/{run_id}/events` and render what
+> arrives. `GET /apps/runs/{run_id}` returns the same record if the stream is unavailable.
 
-> Submit returns a `run_id` immediately. Poll `GET /runs/{run_id}` every ~2s until `status` leaves
-> `queued`/`running`. We may add a streaming endpoint later without changing submit.
+### Submit
 
-Concrete changes for the client:
+`POST /apps/users/{user_id}/sessions/{session_id}/run` returns **`202 {run_id, status}`** — **not**
+the agent's answer. Text fields stay query parameters (`query`, `new_session`, `client_request_id`);
+the body is still reserved for the optional `image_file` upload.
 
-- `POST .../run` now returns **`202`** with `{run_id, status}` — **not** the agent's answer.
-- Poll `GET /apps/runs/{run_id}`; terminal statuses are `succeeded`, `failed`, `cancelled`,
-  `interrupted`. Render `response` on success and `error` otherwise.
-- **`409` means a run is already active** for that session — show "still processing", do not retry
-  blindly.
-- Send `client_request_id` (a UUID generated per user action) so a double-click or a network retry
-  returns the *same* run instead of a `409`.
-- On page load, call `GET .../active-run` to reattach to a run that is still going. This is the
-  answer to "how do I know a run is in flight before I submit" — and it is also what makes a page
-  reload stop losing answers.
+- **`409` means a run is already active** for that session. The body is
+  `{"detail": {"code": "SESSION_BUSY", "message": ..., "run_id": ...}}` with a `Retry-After` header.
+  Show "still processing" and attach to `run_id` — do not retry blindly.
+- Send `client_request_id` (a UUID per user action) so a double-click or a network retry returns the
+  *same* run instead of a `409`.
+
+### Stream
+
+`GET /apps/runs/{run_id}/events` is `text/event-stream`. **Use `fetch` + `ReadableStream`, not
+`EventSource`** — `EventSource` cannot set an `Authorization` header. Resume a dropped connection
+with the `Last-Event-ID` header, or with `?since=<seq>` if your reader does not send it.
+
+| `event:` | `data:` | What to do |
+|---|---|---|
+| `status` | `{status, run_id?}` | the run moved to `queued` / `running` |
+| `delta` | `{text}` | **append** to the open draft message |
+| `message` | `{author, text}` | a complete message — it **replaces** the open draft and closes it |
+| `tool` | `{name, phase}` | progress narration, e.g. "querying mongodb"; `phase` is `call`/`response` |
+| `title` | `{session_title}` | a new session was titled; refresh the session list |
+| `done` | the full run record | terminal — the stream ends right after this |
+
+Lines beginning `:` are keepalive comments; ignore them. Terminal statuses are `succeeded`,
+`failed`, `cancelled`, `interrupted` — render `response` on success and `error` otherwise. The
+`done` event carries the whole record, so no follow-up `GET` is needed in the happy path.
+
+### Fallback and reattach
+
+- `GET /apps/runs/{run_id}` returns the run record at any time. Use it if the stream errors, or as a
+  plain poll behind a proxy that mangles streaming.
+- On page load, call `GET .../active-run` — `200` with the run to reattach to, `204` if nothing is
+  in flight. This is the answer to "how do I know a run is in flight before I submit", and it is
+  what makes a page reload stop losing answers.
+- `POST /apps/runs/{run_id}/cancel` stops a run.
 - Keep the send button disabled while a run is active. That is UX; the `409` is the guarantee.
 
-> **Behaviour change to flag explicitly.** `docs/new-session-flag.md` currently promises that the
-> session title is persisted *before* the `run` response returns, so refetching the session list
-> immediately after `run` resolves is safe. That stops being true: `POST .../run` now returns before
-> the agent has even started, and title creation happens inside the job. Refetch the session list
-> after the run reaches a terminal status instead, and that doc needs updating alongside this
-> migration.
+> **On `docs/new-session-flag.md`.** It promises the session title is persisted before the `run`
+> response returns, so refetching the session list immediately afterwards is safe. `POST .../run`
+> now returns before the agent has started, so that no longer holds for *submit* — but the job
+> creates the title before publishing `done`, so the promise survives if you move the refetch to
+> the `title` or `done` event. That doc should be updated to say so.
 
 ---
 
@@ -457,10 +522,13 @@ Concrete changes for the client:
 
 Cheap, and best done with the same change:
 
-- Typed exceptions instead of blanket `500`s throughout `routers/runner.py`.
-- Prefix artifact filenames with the `run_id` in `_upload_artifact` to kill the version race.
-- Sort events by timestamp explicitly in `get_session`.
-- A per-user concurrency cap, so distinct sessions cannot fan out unbounded LLM and MCP calls.
+- ~~Typed exceptions instead of blanket `500`s~~ — done for the run endpoints
+  (`SessionBusyError` → `409`, `RunNotFoundError` → `404`, `RunNotCancellableError` → `409`). The
+  session endpoints still use blanket `except Exception`.
+- ~~Prefix artifact filenames with the `run_id`~~ — done; `upload_artifact` takes a `prefix`.
+- Sort events by timestamp explicitly in `get_session`. **Still open.**
+- A per-user concurrency cap. **Partially done:** `max_concurrent_runs` is a global semaphore, not
+  per-user. One user with many sessions can still hold every slot.
 
 Separately, and unrelated to this migration: `config.yaml` contains live JWTs and object-storage
 keys, and it is in git history. Those should move to secrets or environment variables and be
@@ -470,9 +538,21 @@ rotated.
 
 ## 10. Follow-ups, once this lands
 
-- **Cancel-and-replace** (policy C) becomes safe once runs are jobs — decide whether a cancelled
+- **Verify ADK streaming end to end.** `RootAgentRunner.execute` passes
+  `RunConfig(streaming_mode=StreamingMode.SSE)`, which is what makes ADK yield `partial` events.
+  Confirm against google-adk 2.4 in a real environment that (a) the LiteLLM path to the internal
+  model actually emits partials, and (b) the final event still carries the aggregated text —
+  `execute` falls back to the accumulated deltas if it does not. `AGENT_RUNS_STREAMING=false`
+  turns streaming off without touching the transport if either turns out to be false.
+- **Reconnect resumes from the last complete event, not mid-token.** Partial events are not
+  persisted by ADK's session service, and the ring buffer is in-memory, so a reconnect after a
+  process restart resumes from the run record rather than the token stream. Worth confirming the UX
+  handles a half-rendered draft being replaced.
+- **Cancel-and-replace** (policy C) becomes safe now that runs are jobs — decide whether a cancelled
   run's partial events stay in the transcript or are purged.
-- **SSE** for live progress narration ("querying MongoDB…", "searching Milvus…"), with the polling
-  path retained as the reconnect fallback.
 - **Multi-worker or multi-replica deployment.** The partial unique index already makes this safe;
-  what needs attention is scoping the startup sweep by `instance_id` and confirming the reaper TTL.
+  what needs attention is scoping the startup sweep by `instance_id`, confirming the reaper TTL,
+  and the fact that the stream broker is **per-process** — a client would have to reach the replica
+  running its job, so this needs sticky routing on `run_id` or a shared fan-out (Redis pub/sub)
+  before a second replica.
+- **Retention.** `RunRepository.delete_older_than` exists but nothing calls it yet.

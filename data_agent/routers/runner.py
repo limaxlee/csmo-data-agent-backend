@@ -3,12 +3,12 @@ import logging
 from typing import Annotated
 from fastapi import APIRouter, status, HTTPException, Path, Depends, Request, UploadFile, File, Response
 
+from data_agent.runners import RootAgentRunner
 from data_agent.schemas import (
     RunAgentRequest, RunAgentResponse, SessionInfo, ListSessionsResponse,
     CreateSessionResponse, RenameSessionRequest, CreateSessionTitleResponse,
     LoadSessionArtifactRequest
 )
-from data_agent.runners import RootAgentRunner
 
 logger = logging.getLogger(__name__)
 
@@ -121,26 +121,26 @@ async def delete_session(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-# @router.get(
-#     "/users/{user_id}/sessions/{session_id}/artifact",
-#     response_class=Response,
-#     status_code=status.HTTP_200_OK
-# )
-# async def load_artifact_session(
-#         user_id: Annotated[str, Path()],
-#         session_id: Annotated[str, Path()],
-#         request: LoadSessionArtifactRequest,
-#         agent_runner: AgentRunner
-# ):
-#     try:
-#         data_object = await agent_runner.load_session_artifact(
-#             user_id=user_id,
-#             session_id=session_id,
-#             request=request
-#         )
-#         return Response(content=data_object.content, media_type=data_object.media_type)
-#     except Exception as e:
-#         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+@router.get(
+    "/users/{user_id}/sessions/{session_id}/artifact",
+    response_class=Response,
+    status_code=status.HTTP_200_OK
+)
+async def load_session_artifact(
+        user_id: Annotated[str, Path()],
+        session_id: Annotated[str, Path()],
+        request: Annotated[LoadSessionArtifactRequest, Depends()],
+        agent_runner: AgentRunner
+):
+    try:
+        data_object = await agent_runner.load_session_artifact(
+            user_id=user_id,
+            session_id=session_id,
+            request=request
+        )
+        return Response(content=data_object.content, media_type=data_object.media_type)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.post(
@@ -164,8 +164,8 @@ async def run(
             request=request,
             image_file=image_file
         )
-        logger.info(f"[TIMING] /run API END session={session_id} elapsed={time.monotonic()-t0:.2f}s")
+        logger.info(f"[TIMING] /run API END session={session_id} elapsed={time.monotonic() - t0:.2f}s")
         return result
     except Exception as e:
-        logger.info(f"[TIMING] /run FAILED session={session_id} elapsed={time.monotonic()-t0:.2f}s")
+        logger.info(f"[TIMING] /run FAILED session={session_id} elapsed={time.monotonic() - t0:.2f}s")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

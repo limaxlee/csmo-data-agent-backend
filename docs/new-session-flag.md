@@ -3,6 +3,10 @@
 **Audience:** frontend developers
 **Endpoint affected:** `POST /apps/users/{user_id}/sessions/{session_id}/run`
 
+> `/run` is now an asynchronous job: it returns `202 {run_id, status}` and the answer arrives on
+> `GET /apps/runs/{run_id}/events`. The `new_session` flag itself is unchanged, but *when* the title
+> is readable is — see "Reading the title back" below, and `docs/migration.md` for the full contract.
+
 ## TL;DR
 
 The backend no longer figures out on its own when a session needs a title. **The client now
@@ -81,15 +85,18 @@ const url = `/apps/users/${userId}/sessions/${sessionId}/run?${params}`;
 const body = new FormData();
 if (imageFile) body.append("image_file", imageFile);
 
-const res = await fetch(url, { method: "POST", body: imageFile ? body : undefined });
+const { run_id } = await fetch(url, { method: "POST", body: imageFile ? body : undefined })
+  .then(r => r.json());
 ```
+
+`run_id` is the handle to the answer, not the answer — open the run's event stream with it.
 
 ## Reading the title back
 
-The run response itself is unchanged — it does **not** include the title:
+The submit response does **not** include the title:
 
 ```json
-{ "response": "...", "timestamp": "2026-08-27T10:15:00Z" }
+{ "run_id": "3f1c...", "status": "queued" }
 ```
 
 The generated title is written into session state under the key `session_title`. Read it from
@@ -98,23 +105,24 @@ either session endpoint:
 - `GET /apps/users/{user_id}/sessions` → `sessions[].state.session_title`
 - `GET /apps/users/{user_id}/sessions/{session_id}` → `state.session_title`
 
-The title is persisted **before** the `run` response is returned, so refetching the session
-list immediately after `run` resolves is safe — the title will already be there. No polling or
-delay needed.
+**Timing changed when `/run` became a job** (see `docs/migration.md`). `POST .../run` now returns
+`202` before the agent has even started, so the title is *not* there when submit resolves. It is
+created inside the job, **before** the run's terminal `done` event — so refetching the session list
+when you see the `title` or `done` event on the run's SSE stream is safe. Do not refetch on submit.
 
 Note that `session_title` is absent from `state` for sessions that never had a title created,
 so read it defensively and fall back to your own placeholder.
 
 ## Failure behaviour
 
-Title generation cannot break a run. If it fails, the error is logged server-side and the
-`run` call still returns its normal `200` with the agent's answer. The practical consequence
-is that a session can occasionally end up without a title even though you sent
+Title generation cannot break a run. If it fails, the error is logged server-side and the run
+still reaches `succeeded` with the agent's answer; no `title` event is emitted. The practical
+consequence is that a session can occasionally end up without a title even though you sent
 `new_session=true` — your UI should tolerate a missing `session_title` rather than assume it
 appears.
 
-Title creation also runs when the agent call itself failed. In that case the `run` request
-returns `500`, but the session may still have been titled.
+Title creation also runs when the agent call itself failed. In that case the run ends as `failed`,
+but the session may still have been titled.
 
 ## Related endpoints (unchanged)
 

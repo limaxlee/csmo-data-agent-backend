@@ -111,8 +111,11 @@ class OSArtifactService(BaseArtifactService):
         versions = []
 
         for data_uri in data_uris:
-            data_uri_suffix = data_uri[len(data_uri_prefix):]
-            versions.append(int(data_uri_suffix))
+            suffix = data_uri[len(data_uri_prefix):]
+            if not suffix.isdigit():
+                logger.warning(f"Skipping malformed artifact key {data_uri} of session {session_id} of user {user_id}")
+                continue
+            versions.append(int(suffix))
 
         logger.info(f"Listed {len(versions)} artifact versions of filename {filename} for user {user_id}")
         return sorted(versions)

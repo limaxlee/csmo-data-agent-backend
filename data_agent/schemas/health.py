@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 
 
-class CheckHealthResponse(BaseModel):
+class CheckHealthStatusResponse(BaseModel):
     server_status: str = "healthy"
-    db_status: str
+    postgresql_db_status: str
     object_storage_status: str

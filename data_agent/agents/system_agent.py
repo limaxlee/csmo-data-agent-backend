@@ -12,11 +12,8 @@ system_model = LiteLlm(
     extra_headers={
         "x-openapi-token": SETTINGS.model_openapi.pass_key,
         "x-generative-ai-client": SETTINGS.model_openapi.client_key,
-        "x-llm-model-id": str(SETTINGS.model_openapi.system_model_id),
-    },
-    # optional:
-    # reasoning_effort="low",
-    # temperature=0.7,
+        "x-llm-model-id": str(SETTINGS.model_openapi.system_model_id)
+    }
 )
 
 system_agent = Agent(

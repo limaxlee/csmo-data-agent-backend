@@ -15,5 +15,4 @@ class TestDatetimeUtils:
         assert local_result.tzinfo is not None
         assert local_result.timestamp() == timestamp
 
-        # Both are the same instant, only the attached tzinfo differs.
         assert local_result == utc_result

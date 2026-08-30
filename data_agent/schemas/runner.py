@@ -32,6 +32,10 @@ class LoadSessionArtifactRequest(BaseModel):
     data_uri: str
 
 
+class LoadSessionArtifactRequest(BaseModel):
+    data_uri: str
+
+
 class LoadSessionArtifactResponse(BaseModel):
     content: bytes
     media_type: str

@@ -7,7 +7,6 @@ from pydantic_settings import BaseSettings
 
 from common.constants import ROOT_DIR
 
-
 _ENV_MAP = {
     "SERVER_PORT": ("server_port", int),
     "MONGODB_MCP_HOST": ("mongodb_mcp.host", str),
@@ -17,6 +16,7 @@ _ENV_MAP = {
     "POSTGRESQL_DB_HOST": ("postgresql_db.host", str),
     "POSTGRESQL_DB_PORT": ("postgresql_db.port", int),
     "POSTGRESQL_DB_NAME": ("postgresql_db.name", str),
+    "POSTGRESQL_DB_USER": ("postgresql_db.user", str),
     "OBJECT_STORAGE_BUCKET": ("object_storage.bucket", str),
     "OBJECT_STORAGE_ENDPOINT": ("object_storage.endpoint", str),
     "OBJECT_STORAGE_ACCESS_KEY": ("object_storage.access_key", str),
@@ -80,6 +80,7 @@ class SessionDBConfig(BaseModel):
     host: str
     port: int
     name: str
+    user: str
 
 
 class ObjectStorageConfig(BaseModel):

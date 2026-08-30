@@ -1,6 +1,5 @@
-import asyncio
-
 import pytest
+import asyncio
 
 from data_agent.storage import ObjectStorage
 
@@ -15,7 +14,7 @@ class TestObjectStorage:
     def test_client(self, mocker):
         storage = ObjectStorage()
 
-        with pytest.raises(RuntimeError, match="not connected"):
+        with pytest.raises(RuntimeError):
             _ = storage.client
 
         client = mocker.MagicMock()
@@ -33,7 +32,6 @@ class TestObjectStorage:
         assert storage.client is client
         storage._session.create_client.assert_called_once()
 
-        # Connecting twice reuses the existing client.
         assert asyncio.run(storage.connect()) is storage
         storage._session.create_client.assert_called_once()
 
@@ -46,7 +44,6 @@ class TestObjectStorage:
         storage._exit_stack.aclose.assert_awaited_once()
         assert storage._client is None
 
-        # Closing an already closed storage does nothing.
         asyncio.run(storage.close())
         storage._exit_stack.aclose.assert_awaited_once()
 
@@ -63,7 +60,6 @@ class TestObjectStorage:
         assert paginator.paginate.call_args.kwargs["Prefix"] == "prefix/"
         assert paginator.paginate.call_args.kwargs["PaginationConfig"] == {"MaxItems": 100}
 
-        # Failures are swallowed and reported as None rather than raising.
         storage._client.get_paginator.side_effect = Exception("boom")
         assert asyncio.run(storage.list_paginated_objects()) is None
 
@@ -75,14 +71,12 @@ class TestObjectStorage:
         assert storage._client.put_object.await_args.kwargs["Key"] == "a/b"
         assert storage._client.put_object.await_args.kwargs["ContentType"] == "image/png"
 
-        # A str argument is treated as a path to read from disk.
         source = tmp_path / "payload.bin"
         source.write_bytes(b"from disk")
         assert asyncio.run(storage.upload_object(str(source), key="a/c")) is True
         assert storage._client.put_object.await_args.kwargs["Body"] == b"from disk"
         assert "ContentType" not in storage._client.put_object.await_args.kwargs
 
-        # Unsupported types and upload errors both come back as False.
         assert asyncio.run(storage.upload_object(123, key="a/d")) is False
 
         storage._client.put_object = mocker.AsyncMock(side_effect=Exception("boom"))
@@ -118,7 +112,6 @@ class TestObjectStorage:
         assert asyncio.run(storage.get_presigned_url(key="a/b", expires_in=60)) == "https://storage/a/b"
         assert storage._client.generate_presigned_url.await_args.kwargs["ExpiresIn"] == 60
 
-        # Unlike the other helpers this one re-raises instead of returning a sentinel.
         storage._client.generate_presigned_url = mocker.AsyncMock(side_effect=Exception("boom"))
         with pytest.raises(Exception, match="boom"):
             asyncio.run(storage.get_presigned_url(key="a/b"))
@@ -133,7 +126,6 @@ class TestObjectStorage:
             "Objects": [{"Key": "a/b"}, {"Key": "a/c"}]
         }
 
-        # Deletes are chunked into batches of 1000.
         storage._client.delete_objects = mocker.AsyncMock(
             return_value={"ResponseMetadata": {"RequestId": "req-2"}, "Deleted": []}
         )

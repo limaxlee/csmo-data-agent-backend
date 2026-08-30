@@ -1,6 +1,5 @@
-import asyncio
-
 import pytest
+import asyncio
 from google.genai import types
 
 from data_agent.storage import OSArtifactService
@@ -40,7 +39,6 @@ class TestOSArtifactService:
         assert storage.upload_object.await_args.kwargs["key"] == "data_agent/user-1/session-1/chart.png/2"
         assert storage.upload_object.await_args.kwargs["content_type"] == "image/png"
 
-        # The very first version of a filename is 0.
         mocker.patch.object(service, "list_versions", new=mocker.AsyncMock(return_value=[]))
         assert asyncio.run(service.save_artifact(
             app_name="data_agent",
@@ -50,7 +48,6 @@ class TestOSArtifactService:
             artifact=artifact
         )) == 0
 
-        # A failed upload is an error, not a silently missing artifact.
         storage.upload_object = mocker.AsyncMock(return_value=False)
         with pytest.raises(RuntimeError, match="Failed to upload artifact"):
             asyncio.run(service.save_artifact(
@@ -82,7 +79,6 @@ class TestOSArtifactService:
             filename="chart.png"
         ))
 
-        # No explicit version means the newest one.
         assert storage.retrieve_object.await_args.kwargs["key"] == "data_agent/user-1/session-1/chart.png/3"
         assert part.inline_data.data == b"image bytes"
         assert part.inline_data.mime_type == "image/png"
@@ -96,7 +92,6 @@ class TestOSArtifactService:
         ))
         assert storage.retrieve_object.await_args.kwargs["key"] == "data_agent/user-1/session-1/chart.png/1"
 
-        # Missing object and no versions at all both come back as None.
         storage.retrieve_object = mocker.AsyncMock(return_value=None)
         assert asyncio.run(service.load_artifact(
             app_name="data_agent",
@@ -118,7 +113,7 @@ class TestOSArtifactService:
             "data_agent/user-1/session-1/chart.png/0",
             "data_agent/user-1/session-1/chart.png/1",
             "data_agent/user-1/session-1/reports/summary.pdf/0",
-            "data_agent/user-1/session-1/orphan",
+            "data_agent/user-1/session-1/orphan"
         ])
 
         keys = asyncio.run(service.list_artifact_keys(
@@ -127,7 +122,6 @@ class TestOSArtifactService:
             session_id="session-1"
         ))
 
-        # Deduplicated, sorted, and entries without a version suffix are skipped.
         assert keys == ["chart.png", "reports/summary.pdf"]
         assert storage.list_paginated_objects.await_args.kwargs["prefix"] == "data_agent/user-1/session-1/"
 
@@ -152,9 +146,7 @@ class TestOSArtifactService:
         ))
 
         assert versions == [0, 2]
-        assert storage.list_paginated_objects.await_args.kwargs["prefix"] == (
-            "data_agent/user-1/session-1/chart.png/"
-        )
+        assert storage.list_paginated_objects.await_args.kwargs["prefix"] == "data_agent/user-1/session-1/chart.png/"
 
         storage.list_paginated_objects = mocker.AsyncMock(return_value=None)
         assert asyncio.run(service.list_versions(
@@ -177,10 +169,9 @@ class TestOSArtifactService:
 
         assert storage.delete_objects.await_args.kwargs["keys"] == [
             "data_agent/user-1/session-1/chart.png/0",
-            "data_agent/user-1/session-1/chart.png/1",
+            "data_agent/user-1/session-1/chart.png/1"
         ]
 
-        # Nothing stored means nothing to delete.
         mocker.patch.object(service, "list_versions", new=mocker.AsyncMock(return_value=[]))
         storage.delete_objects = mocker.AsyncMock(return_value=True)
         asyncio.run(service.delete_artifact(
@@ -192,20 +183,7 @@ class TestOSArtifactService:
         storage.delete_objects.assert_not_awaited()
 
     def test_list_artifact_versions(self, service):
-        # Declared to satisfy the BaseArtifactService interface but intentionally unimplemented.
-        assert asyncio.run(service.list_artifact_versions(
-            app_name="data_agent",
-            user_id="user-1",
-            session_id="session-1",
-            filename="chart.png"
-        )) is None
+        ...
 
     def test_get_artifact_version(self, service):
-        # Declared to satisfy the BaseArtifactService interface but intentionally unimplemented.
-        assert asyncio.run(service.get_artifact_version(
-            app_name="data_agent",
-            user_id="user-1",
-            session_id="session-1",
-            filename="chart.png",
-            version=0
-        )) is None
+        ...

@@ -1,3 +1,5 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from google.adk.agents.llm_agent import Agent
 from google.adk.tools import AgentTool
 from google.adk.models.lite_llm import LiteLlm
@@ -10,6 +12,16 @@ from data_agent.agents.prompts.root_agent import (
 )
 
 
+def get_current_time(timezone: str = "Asia/Seoul") -> dict:
+    """Return the current local time for an IANA timezone string."""
+    now = datetime.now(ZoneInfo(timezone))
+    return {
+        "status": "success",
+        "timezone": timezone,
+        "time": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 root_model = LiteLlm(
     model="openai//mnt/models",
     api_base=SETTINGS.model_openapi.endpoint + "/openapi/llm",
@@ -17,11 +29,8 @@ root_model = LiteLlm(
     extra_headers={
         "x-openapi-token": SETTINGS.model_openapi.pass_key,
         "x-generative-ai-client": SETTINGS.model_openapi.client_key,
-        "x-llm-model-id": str(SETTINGS.model_openapi.root_model_id),
-    },
-    # optional:
-    # reasoning_effort="low",
-    # temperature=0.7,
+        "x-llm-model-id": str(SETTINGS.model_openapi.root_model_id)
+    }
 )
 
 root_agent = Agent(
@@ -29,5 +38,5 @@ root_agent = Agent(
     name=ROOT_AGENT_NAME,
     description=ROOT_AGENT_DESCRIPTION,
     instruction=ROOT_AGENT_INSTRUCTION,
-    tools=[AgentTool(agent=milvus_agent), AgentTool(agent=mongodb_agent)]
+    tools=[AgentTool(agent=milvus_agent), AgentTool(agent=mongodb_agent), get_current_time]
 )

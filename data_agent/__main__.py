@@ -17,8 +17,7 @@ async def lifespan(app: FastAPI):
     app.state.object_storage = object_storage
     app.state.agent_runner = RootAgentRunner(
         artifact_service=OSArtifactService(storage=object_storage),
-        system_runner=SystemAgentRunner(),
-        # object_storage=object_storage
+        system_runner=SystemAgentRunner()
     )
     try:
         yield

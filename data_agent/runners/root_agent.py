@@ -1,4 +1,3 @@
-import time
 import uuid
 import logging
 from fastapi import UploadFile
@@ -15,11 +14,11 @@ from common.constants import (
 from data_agent.agents import root_agent
 from data_agent.schemas import (
     RunAgentRequest, RunAgentResponse, SessionInfo, ListSessionsResponse,
-    CreateSessionResponse, RenameSessionRequest, CreateSessionTitleResponse
+    CreateSessionResponse, RenameSessionRequest, CreateSessionTitleResponse,
+    LoadSessionArtifactRequest, LoadSessionArtifactResponse
 )
 from data_agent.runners.system_agent import SystemAgentRunner
 from data_agent.storage.os_artifact import OSArtifactService
-# from data_agent.storage import ObjectStorage
 from data_agent.utils import convert_unix_to_datetime
 
 logger = logging.getLogger(__name__)
@@ -29,16 +28,14 @@ class RootAgentRunner:
     def __init__(
             self,
             artifact_service: OSArtifactService,
-            system_runner: SystemAgentRunner,
-            # object_storage: ObjectStorage
+            system_runner: SystemAgentRunner
     ):
-        # self._storage = object_storage
         self._app_name = ROOT_APP_NAME
         self._artifact_service = artifact_service
         self._system_runner = system_runner
+        self._db_url = f"{SETTINGS.postgresql_db.host}:{SETTINGS.postgresql_db.port}/{SETTINGS.postgresql_db.name}"
+        self._session_service = DatabaseSessionService(db_url=f"postgresql+asyncpg://postgres@{self._db_url}")
 
-        db_url = f"{SETTINGS.postgresql_db.host}:{SETTINGS.postgresql_db.port}/{SETTINGS.postgresql_db.name}"
-        self._session_service = DatabaseSessionService(db_url=f"postgresql+asyncpg://postgres@{db_url}")
         self._runner = Runner(
             agent=root_agent,
             app_name=ROOT_APP_NAME,
@@ -204,26 +201,6 @@ class RootAgentRunner:
             logger.exception(f"Failed to get session {session_id} of user {user_id}: {str(e)}")
             raise
 
-    # async def load_session_artifact(
-    #         self,
-    #         user_id: str,
-    #         session_id: str,
-    #         request: LoadSessionArtifactRequest
-    # ) -> LoadSessionArtifactResponse:
-    #     data_uri = request.data_uri
-    #     try:
-    #         data_info = await self._storage.retrieve_object_info(key=data_uri)
-    #         media_type = data_info.get("ContentType") or "application/octet-stream"
-    #
-    #         data_object = await self._storage.retrieve_object(data_uri)
-    #         if not data_object:
-    #             raise ValueError(f"No data found with key {data_uri} for session {session_id} of user {user_id}")
-    #
-    #         return LoadSessionArtifactResponse(content=data_object, media_type=media_type)
-    #     except Exception as e:
-    #         logger.exception(f"Failed to load artifact {data_uri} for session {session_id} of user {user_id}: {str(e)}")
-    #         raise
-
     async def delete_session(self, user_id: str, session_id: str):
         try:
             await self._session_service.delete_session(
@@ -237,6 +214,26 @@ class RootAgentRunner:
             logger.exception(f"Failed to delete session {session_id} of user {user_id}: {str(e)}")
             raise
 
+    async def load_session_artifact(
+            self,
+            user_id: str,
+            session_id: str,
+            request: LoadSessionArtifactRequest
+    ) -> LoadSessionArtifactResponse:
+        data_uri = request.data_uri
+        try:
+            data_info = await self._storage.retrieve_object_info(key=data_uri)
+            media_type = data_info.get("ContentType") or "application/octet-stream"
+    
+            data_object = await self._storage.retrieve_object(data_uri)
+            if not data_object:
+                raise ValueError(f"No data found with key {data_uri} for session {session_id} of user {user_id}")
+    
+            return LoadSessionArtifactResponse(content=data_object, media_type=media_type)
+        except Exception as e:
+            logger.exception(f"Failed to load artifact {data_uri} for session {session_id} of user {user_id}: {str(e)}")
+            raise
+
     async def run(
             self,
             user_id: str,
@@ -246,16 +243,18 @@ class RootAgentRunner:
     ) -> RunAgentResponse:
         try:
             prompt = request.query
+            parts = []
             if image_file is not None:
                 data_uri = await self._upload_artifact(user_id=user_id, session_id=session_id, image_file=image_file)
-                prompt = (
-                    f"{request.query}\n\n"
-                    f"{DATA_URI_PREFIX} {data_uri}\n"
-                    f"{FILENAME_PREFIX} {image_file.filename}\n"
-                    f"{CONTENT_TYPE} {image_file.content_type or "image/jpeg"}"
-                )
+                parts.append(types.Part(
+                    text=f"Uploaded Artifact:\n"
+                         f"{FILENAME_PREFIX}: {image_file.filename}\n"
+                         f"{DATA_URI_PREFIX}: {data_uri}\n"
+                         f"{CONTENT_TYPE}: {image_file.content_type or "image/jpeg"}"
+                ))
 
-            content = types.Content(role="user", parts=[types.Part(text=prompt)])
+            parts.append(types.Part(text=prompt))
+            content = types.Content(role=USER_AUTHOR, parts=parts)
             events = self._runner.run_async(user_id=user_id, session_id=session_id, new_message=content)
 
             response = "No response received."
@@ -263,7 +262,6 @@ class RootAgentRunner:
             final_seen = False
 
             async for event in events:
-                logger.info(f"[TIMING] event author={event.author} type={type(event).__name__} at={time.time()}")
                 if not final_seen and event.is_final_response():
                     final_seen = True
                     timestamp = event.timestamp
@@ -280,12 +278,6 @@ class RootAgentRunner:
         finally:
             if request.new_session:
                 try:
-                    await self.create_session_title(
-                        user_id=user_id,
-                        session_id=session_id,
-                        user_message=request.query
-                    )
+                    await self.create_session_title(user_id=user_id, session_id=session_id, user_message=request.query)
                 except Exception as e:
-                    logger.exception(
-                        f"Failed to create a title for new session {session_id} of user {user_id}: {str(e)}"
-                    )
+                    logger.exception(f"Failed to create a title for session {session_id} of user {user_id}: {str(e)}")

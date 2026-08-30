@@ -19,6 +19,7 @@ postgresql_db:
   host: 10.240.35.180
   port: 5432
   name: cosmoData
+  user: postgres
 
 object_storage:
   bucket: cosmo-storage-stage

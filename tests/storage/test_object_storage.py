@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+from botocore.exceptions import ClientError
 
 from data_agent.storage import ObjectStorage
 
@@ -34,6 +35,20 @@ class TestObjectStorage:
 
         assert asyncio.run(storage.connect()) is storage
         storage._session.create_client.assert_called_once()
+
+        storage = ObjectStorage()
+        storage._session = mocker.MagicMock()
+        storage._exit_stack = mocker.MagicMock()
+        storage._exit_stack.enter_async_context = mocker.AsyncMock(
+            side_effect=ClientError({"Error": {"Code": "403"}}, "CreateClient")
+        )
+        with pytest.raises(ClientError):
+            asyncio.run(storage.connect())
+        assert storage._client is None
+
+        storage._exit_stack.enter_async_context = mocker.AsyncMock(side_effect=Exception("boom"))
+        with pytest.raises(Exception, match="boom"):
+            asyncio.run(storage.connect())
 
     def test_close(self, mocker, storage):
         storage._exit_stack = mocker.MagicMock()

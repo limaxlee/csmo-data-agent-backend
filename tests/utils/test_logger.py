@@ -1,9 +1,43 @@
+import os
 import pytest
 import logging
 import zipfile
 from io import BytesIO
 
-from data_agent.utils.logger import LogConfig, initialize_logger, get_logs_zip_file, _create_logs_zip_file
+from data_agent.utils.logger import (
+    ExecutorHolder, LogConfig, initialize_logger, get_logs_zip_file,
+    shutdown_logs_executor, _get_executor, _create_logs_zip_file
+)
+
+
+class TestLogsExecutor:
+    def test_creates_and_caches_executor(self, mocker):
+        pool = mocker.patch("data_agent.utils.logger.ProcessPoolExecutor")
+
+        executor = _get_executor()
+
+        assert executor is pool.return_value
+        assert ExecutorHolder.instance is executor
+        assert pool.call_args.kwargs["max_workers"] == os.cpu_count()
+
+        assert _get_executor() is executor
+        pool.assert_called_once()
+
+    def test_shutdown_logs_executor(self, mocker):
+        executor = mocker.MagicMock()
+        ExecutorHolder.instance = executor
+
+        shutdown_logs_executor()
+
+        executor.shutdown.assert_called_once_with(wait=True)
+        assert ExecutorHolder.instance is None
+
+    def test_shutdown_logs_executor_when_not_started(self):
+        assert ExecutorHolder.instance is None
+
+        shutdown_logs_executor()
+
+        assert ExecutorHolder.instance is None
 
 
 class TestInitializeLogger:

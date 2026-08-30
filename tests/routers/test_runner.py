@@ -7,7 +7,7 @@ from starlette import status
 from data_agent.routers.runner import get_agent_runner, router
 from data_agent.schemas import (
     CreateSessionResponse, CreateSessionTitleResponse, ListSessionsResponse,
-    RunAgentResponse, SessionInfo,
+    LoadSessionArtifactResponse, RunAgentResponse, SessionInfo,
 )
 
 TIMESTAMP = datetime(2026, 8, 27, 10, 15, tzinfo=timezone.utc)
@@ -133,6 +133,29 @@ class TestRunnerRoutes:
         agent_runner.delete_session = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         assert client.delete("/apps/users/user-1/sessions/session-1").status_code == \
                status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    def test_load_session_artifact(self, mocker, client, agent_runner):
+        agent_runner.load_session_artifact = mocker.AsyncMock(
+            return_value=LoadSessionArtifactResponse(content=b"image bytes", media_type="image/png")
+        )
+
+        response = client.get(
+            "/apps/users/user-1/sessions/session-1/artifact?data_uri=data_agent%2Fuser-1%2Fsession-1%2Fchart.png%2F0"
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.content == b"image bytes"
+        assert response.headers["content-type"] == "image/png"
+        assert agent_runner.load_session_artifact.await_args.kwargs["session_id"] == "session-1"
+        assert agent_runner.load_session_artifact.await_args.kwargs["request"].data_uri == \
+               "data_agent/user-1/session-1/chart.png/0"
+
+        assert client.get("/apps/users/user-1/sessions/session-1/artifact").status_code == \
+               status.HTTP_422_UNPROCESSABLE_CONTENT
+
+        agent_runner.load_session_artifact = mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        response = client.get("/apps/users/user-1/sessions/session-1/artifact?data_uri=missing")
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
 
     def test_run(self, mocker, client, agent_runner):
         agent_runner.run = mocker.AsyncMock(

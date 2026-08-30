@@ -1,4 +1,7 @@
+import pytest
 import importlib
+from datetime import datetime
+from zoneinfo import ZoneInfoNotFoundError
 
 from common.config import SETTINGS
 from data_agent.agents.prompts.root_agent import ROOT_AGENT_NAME, ROOT_AGENT_DESCRIPTION, ROOT_AGENT_INSTRUCTION
@@ -7,6 +10,20 @@ MODULE = "data_agent.agents.root_agent"
 
 
 class TestRootAgent:
+    def test_get_current_time(self, adk):
+        module = adk.reload(MODULE)
+
+        result = module.get_current_time("UTC")
+
+        assert result["status"] == "success"
+        assert result["timezone"] == "UTC"
+        assert datetime.strptime(result["time"], "%Y-%m-%d %H:%M:%S")
+
+        assert module.get_current_time()["timezone"] == "Asia/Seoul"
+
+        with pytest.raises(ZoneInfoNotFoundError):
+            module.get_current_time("Not/AZone")
+
     def test_root_model(self, adk):
         module = adk.reload(MODULE)
 

@@ -34,4 +34,34 @@ class TestHealthRoutes:
             "postgresql_db_status": "healthy",
             "object_storage_status": "healthy"
         }
-        
+
+        mocker.patch.object(
+            health_router_module,
+            "check_postgres_health",
+            new=mocker.AsyncMock(return_value=False)
+        )
+        mocker.patch.object(
+            health_router_module,
+            "check_storage_health",
+            new=mocker.AsyncMock(return_value=False)
+        )
+
+        response = client.get("/health")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == {
+            "server_status": "healthy",
+            "postgresql_db_status": "unhealthy",
+            "object_storage_status": "unhealthy"
+        }
+
+        mocker.patch.object(
+            health_router_module,
+            "check_postgres_health",
+            new=mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        )
+
+        response = client.get("/health")
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"] == "Runtime error"

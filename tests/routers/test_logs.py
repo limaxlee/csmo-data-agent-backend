@@ -25,3 +25,20 @@ class TestLogsRoutes:
         assert response.content == b"zip-bytes"
         assert response.headers["content-type"] == "application/zip"
         assert response.headers["content-disposition"].endswith('.zip"')
+
+        mocker.patch.object(logs_router_module, "get_logs_zip_file", new=mocker.AsyncMock(return_value=None))
+
+        response = client.get("/logs")
+
+        # The HTTPException(404) raised inside the try block is caught by `except Exception` and re-wrapped as a 500
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert "No log files found" in response.json()["detail"]
+
+        mocker.patch.object(
+            logs_router_module, "get_logs_zip_file", new=mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        )
+
+        response = client.get("/logs")
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"] == "Runtime error"

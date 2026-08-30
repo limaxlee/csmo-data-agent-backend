@@ -40,3 +40,24 @@ root_agent = Agent(
     instruction=ROOT_AGENT_INSTRUCTION,
     tools=[AgentTool(agent=milvus_agent), AgentTool(agent=mongodb_agent), get_current_time]
 )
+
+
+
+
+# from google.adk.agents.llm_agent import Agent
+# from google.adk.tools import AgentTool
+
+# from data_agent.agents.llm import build_model, with_current_time, ROOT_REASONING_EFFORT
+# from data_agent.agents.milvus_scanner import milvus_agent
+# from data_agent.agents.mongodb_scanner import mongodb_agent
+# from data_agent.agents.prompts.root_agent import (
+#     ROOT_AGENT_NAME, ROOT_AGENT_DESCRIPTION, ROOT_AGENT_INSTRUCTION
+# )
+
+# root_agent = Agent(
+#     model=build_model(ROOT_REASONING_EFFORT),
+#     name=ROOT_AGENT_NAME,
+#     description=ROOT_AGENT_DESCRIPTION,
+#     instruction=with_current_time(ROOT_AGENT_INSTRUCTION),
+#     tools=[AgentTool(agent=milvus_agent), AgentTool(agent=mongodb_agent)],
+# )

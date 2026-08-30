@@ -28,3 +28,23 @@ mongodb_agent = Agent(
         )
     ]
 )
+
+
+# from google.adk.agents.llm_agent import Agent
+# from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+# from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+
+# from common.config import SETTINGS
+# from data_agent.agents.llm import build_model, with_current_time, SCANNER_REASONING_EFFORT
+# from data_agent.agents.prompts.mongodb_scanner import MONGODB_AGENT_NAME, MONGODB_AGENT_INSTRUCTION
+
+# mongodb_agent = Agent(
+#     model=build_model(SCANNER_REASONING_EFFORT),
+#     name=MONGODB_AGENT_NAME,
+#     instruction=with_current_time(MONGODB_AGENT_INSTRUCTION),
+#     tools=[
+#         MCPToolset(connection_params=StreamableHTTPConnectionParams(
+#             url=f"http://{SETTINGS.mongodb_mcp.host}:{SETTINGS.mongodb_mcp.port}/mcp")
+#         )
+#     ],
+# )

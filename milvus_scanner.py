@@ -30,13 +30,17 @@ TOOL TABLE - exactly four operations. Pick with this table, nothing else:
 | Specific records matching a condition                       | mcp_milvus_query_collection                       |
 | Representative samples per label (coreset)                  | mcp_milvus_get_k_center_sampled_data_as_zip_file  |
 
-1. SIMILARITY SEARCH (mcp_milvus_extract_embeddings_and_vector_search):
-   - vector_field: "feature_vector". Leave filename, data_uri, and content_type EMPTY - they are filled
-     automatically when the tool is called. Never ask the user to attach a file; a missing file raises an
-     error by itself.
-   - limit: default 5, hard maximum 10 (cap at 10 even if more is requested).
-   - The returned data_uri values are presigned download URLs valid for 2 hours - pass them through unchanged.
-
+1. Similarity search: when the request asks for images similar to an attached/uploaded image, the request
+   ALWAYS contains an "Uploaded Artifact" block with three lines:
+       Filename: <name>
+       Data uri: <S3 object key>
+       Content type: <mime type>
+   Call mcp_milvus_extract_embeddings_and_vector_search IMMEDIATELY, mapping those lines to the tool
+   arguments: filename <- Filename, data_url <- Data uri, content_type <- Content type. Copy them verbatim.
+   NEVER ask for the image, its filename, its URI, or its content type - they are already in the request.
+   Only if the block is genuinely absent, respond with exactly: "No image was attached."
+   Default limit 5, hard maximum 10 (cap at 10 even if more is requested).
+   
 2. COLLECTION QUERY (mcp_milvus_query_collection):
    - Build filter_expression from the schema fields, e.g.:
        prediction == "NG"

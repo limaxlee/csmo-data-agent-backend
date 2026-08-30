@@ -31,3 +31,24 @@ milvus_agent = Agent(
         )
     ]
 )
+
+
+
+# from google.adk.agents.llm_agent import Agent
+# from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+# from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
+
+# from common.config import SETTINGS
+# from data_agent.agents.llm import build_model, SCANNER_REASONING_EFFORT
+# from data_agent.agents.prompts.milvus_scanner import MILVUS_AGENT_NAME, MILVUS_AGENT_INSTRUCTION
+
+# milvus_agent = Agent(
+#     model=build_model(SCANNER_REASONING_EFFORT),
+#     name=MILVUS_AGENT_NAME,
+#     instruction=MILVUS_AGENT_INSTRUCTION,
+#     tools=[
+#         MCPToolset(connection_params=StreamableHTTPConnectionParams(
+#             url=f"http://{SETTINGS.milvus_mcp.host}:{SETTINGS.milvus_mcp.port}/mcp")
+#         )
+#     ],
+# )

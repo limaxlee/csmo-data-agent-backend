@@ -24,6 +24,7 @@ FIELD VALUES (fixed vocabulary - use as filter values directly):
 - Summaries additionally support: location, equipment_id, product_id.
 
 DATES:
+- The current local time is given at the top of this instruction. Use it for all relative periods.
 - Format every date as %Y-%m-%d %H:%M:%S. No time given -> 00:00:00.
 - Relative periods ("last week", "past 7 days") -> compute explicit start_date and end_date yourself and use
   both in the call. An end date "up to day D" means D+1 00:00:00 as the upper bound.

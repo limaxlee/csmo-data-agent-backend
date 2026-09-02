@@ -178,13 +178,14 @@ class TestRootAgentRunner:
             asyncio.run(agent_runner.delete_session(user_id="user-1", session_id="session-1"))
 
     def test_load_session_artifact(self, mocker, agent_runner):
-        agent_runner._storage = mocker.MagicMock()
-        agent_runner._storage.retrieve_object_info = mocker.AsyncMock(return_value={"ContentType": "image/png"})
-        agent_runner._storage.retrieve_object = mocker.AsyncMock(return_value=b"image bytes")
+        artifact = mocker.MagicMock()
+        artifact.inline_data.data = b"image bytes"
+        artifact.inline_data.mime_type = "image/png"
+        agent_runner._artifact_service.load_artifact = mocker.AsyncMock(return_value=artifact)
         request = LoadSessionArtifactRequest(
-            data_uri="data_agent/user-1/session-1/chart.png/0",
+            data_uri="data_agent/user-1/session-1/chart.png/2",
             filename="chart.png",
-            media_type="image/png"
+            media_type="image/jpeg"
         )
 
         result = asyncio.run(agent_runner.load_session_artifact(
@@ -195,20 +196,18 @@ class TestRootAgentRunner:
 
         assert result.content == b"image bytes"
         assert result.media_type == "image/png"
-        assert agent_runner._storage.retrieve_object_info.await_args.kwargs["key"] == \
-               "data_agent/user-1/session-1/chart.png/0"
-        assert agent_runner._storage.retrieve_object.await_args.args == \
-               ("data_agent/user-1/session-1/chart.png/0",)
+        assert agent_runner._artifact_service.load_artifact.await_args.kwargs["filename"] == "chart.png"
+        assert agent_runner._artifact_service.load_artifact.await_args.kwargs["version"] == 2
 
-        agent_runner._storage.retrieve_object_info = mocker.AsyncMock(return_value={})
+        artifact.inline_data.mime_type = None
         result = asyncio.run(agent_runner.load_session_artifact(
             user_id="user-1",
             session_id="session-1",
             request=request
         ))
-        assert result.media_type == "application/octet-stream"
+        assert result.media_type == "image/jpeg"
 
-        agent_runner._storage.retrieve_object = mocker.AsyncMock(return_value=None)
+        artifact.inline_data = None
         with pytest.raises(ValueError):
             asyncio.run(agent_runner.load_session_artifact(
                 user_id="user-1",
@@ -216,7 +215,15 @@ class TestRootAgentRunner:
                 request=request
             ))
 
-        agent_runner._storage.retrieve_object_info = mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        agent_runner._artifact_service.load_artifact = mocker.AsyncMock(return_value=None)
+        with pytest.raises(ValueError):
+            asyncio.run(agent_runner.load_session_artifact(
+                user_id="user-1",
+                session_id="session-1",
+                request=request
+            ))
+
+        agent_runner._artifact_service.load_artifact = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         with pytest.raises(Exception):
             asyncio.run(agent_runner.load_session_artifact(
                 user_id="user-1",
@@ -265,10 +272,11 @@ class TestRootAgentRunner:
         )
 
         upload.assert_awaited_once()
-        prompt = agent_runner._runner.run_async.call_args.kwargs["new_message"].parts[0].text
-        assert prompt.startswith("What is in this chart?")
-        assert f"{ArtifactPrefix.DATA_URI} data_agent/u/s/chart.png/0" in prompt
-        assert "chart.png" in prompt
+        parts = agent_runner._runner.run_async.call_args.kwargs["new_message"].parts
+        assert parts[-1].text == "What is in this chart?"
+        assert f"{ArtifactPrefix.DATA_URI}: data_agent/u/s/chart.png/0" in parts[0].text
+        assert f"{ArtifactPrefix.FILENAME}: chart.png" in parts[0].text
+        assert f"{ArtifactPrefix.CONTENT_TYPE}: image/png" in parts[0].text
 
         asyncio.run(
             agent_runner.run(
@@ -301,3 +309,45 @@ class TestRootAgentRunner:
                     request=RunAgentRequest(query="Hello")
                 )
             )
+
+    def test_run_without_final_content(self, mocker, agent_runner):
+        escalated_event = mocker.MagicMock()
+        escalated_event.is_final_response.return_value = True
+        escalated_event.timestamp = 1700000000.0
+        escalated_event.content = None
+        escalated_event.actions.escalate = True
+        escalated_event.error_message = "Tool crashed"
+
+        async def _events():
+            yield escalated_event
+
+        agent_runner._runner.run_async = mocker.MagicMock(side_effect=lambda **kwargs: _events())
+
+        result = asyncio.run(
+            agent_runner.run(
+                user_id="user-1",
+                session_id="session-1",
+                request=RunAgentRequest(query="Hello")
+            )
+        )
+        assert result.response == "Agent escalated: Tool crashed"
+
+        async def _no_final_events():
+            event = mocker.MagicMock()
+            event.is_final_response.return_value = False
+            event.timestamp = 1700000000.0
+            yield event
+            yield escalated_event
+
+        agent_runner._runner.run_async = mocker.MagicMock(side_effect=lambda **kwargs: _no_final_events())
+        escalated_event.actions.escalate = False
+
+        result = asyncio.run(
+            agent_runner.run(
+                user_id="user-1",
+                session_id="session-1",
+                request=RunAgentRequest(query="Hello")
+            )
+        )
+        assert result.response == "No response received."
+        assert result.timestamp.timestamp() == 1700000000.0

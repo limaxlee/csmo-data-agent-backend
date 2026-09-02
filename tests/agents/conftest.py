@@ -11,6 +11,7 @@ class ADKMocks:
         self.connection_params = mocker.patch(
             "google.adk.tools.mcp_tool.mcp_session_manager.StreamableHTTPConnectionParams"
         )
+        self.build_model = mocker.patch("data_agent.agents.llm.build_model")
         self._reloaded = []
 
     def reload(self, module_name):

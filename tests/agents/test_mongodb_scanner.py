@@ -1,5 +1,6 @@
 from common.config import SETTINGS
-from common.constants import AgentNames
+from common.constants import AgentNames, ModelReasoningEffort
+from data_agent.agents.instructions import MONGODB_AGENT_INSTRUCTION
 
 MODULE = "data_agent.agents.mongodb_scanner"
 
@@ -17,4 +18,12 @@ class TestMongodbScanner:
         kwargs = adk.agent.call_args.kwargs
         assert kwargs["name"] == AgentNames.MONGODB
         assert kwargs["tools"] == [adk.toolset.return_value]
+        assert kwargs["model"] is adk.build_model.return_value
+        assert adk.build_model.call_args.args == (ModelReasoningEffort.LOW,)
+
+        instruction = kwargs["instruction"]
+        assert callable(instruction)
+        rendered = instruction(None)
+        assert rendered.startswith("CURRENT LOCAL TIME:")
+        assert rendered.endswith(MONGODB_AGENT_INSTRUCTION)
         assert module.mongodb_agent is adk.agent.return_value

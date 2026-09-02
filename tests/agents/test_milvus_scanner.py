@@ -1,5 +1,5 @@
 from common.config import SETTINGS
-from common.constants import AgentNames
+from common.constants import AgentNames, ModelReasoningEffort
 from data_agent.agents.instructions.milvus_scanner import MILVUS_AGENT_INSTRUCTION
 
 MODULE = "data_agent.agents.milvus_scanner"
@@ -18,4 +18,6 @@ class TestMilvusScanner:
         assert kwargs["name"] == AgentNames.MILVUS
         assert kwargs["instruction"] == MILVUS_AGENT_INSTRUCTION
         assert kwargs["tools"] == [adk.toolset.return_value]
+        assert kwargs["model"] is adk.build_model.return_value
+        assert adk.build_model.call_args.args == (ModelReasoningEffort.LOW,)
         assert module.milvus_agent is adk.agent.return_value

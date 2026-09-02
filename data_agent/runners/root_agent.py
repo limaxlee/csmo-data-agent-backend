@@ -7,16 +7,9 @@ from google.adk.sessions import DatabaseSessionService, Session
 from google.genai import types
 
 from common.config import SETTINGS
-from common.constants import (
-    ROOT_APP_NAME, USER_AUTHOR, SYSTEM_AUTHOR, SESSION_TITLE_KEY,
-    DATA_URI_PREFIX, FILENAME_PREFIX, CONTENT_TYPE
-)
+from common.constants import SessionStateFields, ArtifactPrefix, EventAuthors, AppNames
 from data_agent.agents import root_agent
-from data_agent.schemas import (
-    RunAgentRequest, RunAgentResponse, SessionInfo, ListSessionsResponse,
-    CreateSessionResponse, RenameSessionRequest, CreateSessionTitleResponse,
-    LoadSessionArtifactRequest, LoadSessionArtifactResponse
-)
+from data_agent.schemas import *
 from data_agent.runners.system_agent import SystemAgentRunner
 from data_agent.storage.os_artifact import OSArtifactService
 from data_agent.utils import convert_unix_to_datetime
@@ -30,15 +23,14 @@ class RootAgentRunner:
             artifact_service: OSArtifactService,
             system_runner: SystemAgentRunner
     ):
-        self._app_name = ROOT_APP_NAME
+        self._app_name = AppNames.ROOT
         self._artifact_service = artifact_service
         self._system_runner = system_runner
         self._db_url = f"{SETTINGS.postgresql_db.host}:{SETTINGS.postgresql_db.port}/{SETTINGS.postgresql_db.name}"
         self._session_service = DatabaseSessionService(db_url=f"postgresql+asyncpg://postgres@{self._db_url}")
-
         self._runner = Runner(
             agent=root_agent,
-            app_name=ROOT_APP_NAME,
+            app_name=AppNames.ROOT,
             session_service=self._session_service,
             artifact_service=artifact_service
         )
@@ -46,7 +38,7 @@ class RootAgentRunner:
     @staticmethod
     def _find_last_user_message(session: Session) -> str | None:
         for event in reversed(session.events):
-            if event.author != USER_AUTHOR or not event.content or not event.content.parts:
+            if event.author != EventAuthors.USER or not event.content or not event.content.parts:
                 continue
 
             for part in reversed(event.content.parts):
@@ -57,8 +49,8 @@ class RootAgentRunner:
 
     async def _set_title(self, session: Session, session_title: str):
         await self._session_service.append_event(session, Event(
-            author=SYSTEM_AUTHOR,
-            actions=EventActions(state_delta={SESSION_TITLE_KEY: session_title})
+            author=EventAuthors.SYSTEM,
+            actions=EventActions(state_delta={SessionStateFields.TITLE: session_title})
         ))
 
     async def _upload_artifact(self, user_id: str, session_id: str, image_file: UploadFile) -> str:
@@ -222,14 +214,20 @@ class RootAgentRunner:
     ) -> LoadSessionArtifactResponse:
         data_uri = request.data_uri
         try:
-            data_info = await self._storage.retrieve_object_info(key=data_uri)
-            media_type = data_info.get("ContentType") or "application/octet-stream"
-    
-            data_object = await self._storage.retrieve_object(data_uri)
-            if not data_object:
+            artifact = await self._artifact_service.load_artifact(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id,
+                filename=request.filename,
+                version=int(request.data_uri[-1])
+            )
+            if not artifact or not artifact.inline_data:
                 raise ValueError(f"No data found with key {data_uri} for session {session_id} of user {user_id}")
-    
-            return LoadSessionArtifactResponse(content=data_object, media_type=media_type)
+
+            return LoadSessionArtifactResponse(
+                content=artifact.inline_data.data,
+                media_type=artifact.inline_data.mime_type or request.media_type
+            )
         except Exception as e:
             logger.exception(f"Failed to load artifact {data_uri} for session {session_id} of user {user_id}: {str(e)}")
             raise
@@ -242,19 +240,18 @@ class RootAgentRunner:
             image_file: UploadFile | None = None
     ) -> RunAgentResponse:
         try:
-            prompt = request.query
             parts = []
             if image_file is not None:
                 data_uri = await self._upload_artifact(user_id=user_id, session_id=session_id, image_file=image_file)
                 parts.append(types.Part(
                     text=f"Uploaded Artifact:\n"
-                         f"{FILENAME_PREFIX}: {image_file.filename}\n"
-                         f"{DATA_URI_PREFIX}: {data_uri}\n"
-                         f"{CONTENT_TYPE}: {image_file.content_type or "image/jpeg"}"
+                         f"{ArtifactPrefix.FILENAME}: {image_file.filename}\n"
+                         f"{ArtifactPrefix.DATA_URI}: {data_uri}\n"
+                         f"{ArtifactPrefix.CONTENT_TYPE}: {image_file.content_type}"
                 ))
 
-            parts.append(types.Part(text=prompt))
-            content = types.Content(role=USER_AUTHOR, parts=parts)
+            parts.append(types.Part(text=request.query))
+            content = types.Content(role=EventAuthors.USER, parts=parts)
             events = self._runner.run_async(user_id=user_id, session_id=session_id, new_message=content)
 
             response = "No response received."

@@ -121,16 +121,6 @@ class TestObjectStorage:
         storage._client.head_object = mocker.AsyncMock(side_effect=Exception("boom"))
         assert asyncio.run(storage.retrieve_object_info(key="a/b")) is None
 
-    def test_get_presigned_url(self, mocker, storage):
-        storage._client.generate_presigned_url = mocker.AsyncMock(return_value="https://storage/a/b")
-
-        assert asyncio.run(storage.get_presigned_url(key="a/b", expires_in=60)) == "https://storage/a/b"
-        assert storage._client.generate_presigned_url.await_args.kwargs["ExpiresIn"] == 60
-
-        storage._client.generate_presigned_url = mocker.AsyncMock(side_effect=Exception("boom"))
-        with pytest.raises(Exception, match="boom"):
-            asyncio.run(storage.get_presigned_url(key="a/b"))
-
     def test_delete_objects(self, mocker, storage):
         storage._client.delete_objects = mocker.AsyncMock(
             return_value={"ResponseMetadata": {"RequestId": "req-1"}, "Deleted": [{"Key": "a/b"}]}

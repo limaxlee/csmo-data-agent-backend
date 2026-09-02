@@ -26,3 +26,4 @@ object_storage:
   endpoint: https://gage.ap-northeast-2.samsungspc.com
   access_key: AKIA5PMO9S8UVFAFT68P
   secret_key: gCBynEY51EVVuV901dEybGl8JnwoPkQy9YK7AbjW
+  

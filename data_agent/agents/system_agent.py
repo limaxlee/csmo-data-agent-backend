@@ -2,8 +2,8 @@ from google.adk.agents.llm_agent import Agent
 from google.adk.models.lite_llm import LiteLlm
 
 from common.config import SETTINGS
-from data_agent.agents.prompts.system_agent import SYSTEM_AGENT_NAME, SYSTEM_AGENT_INSTRUCTION
-
+from common.constants import AgentNames
+from data_agent.agents.instructions.system_agent import SYSTEM_AGENT_INSTRUCTION
 
 system_model = LiteLlm(
     model="openai//mnt/models",
@@ -18,6 +18,6 @@ system_model = LiteLlm(
 
 system_agent = Agent(
     model=system_model,
-    name=SYSTEM_AGENT_NAME,
+    name=AgentNames.SYSTEM,
     instruction=SYSTEM_AGENT_INSTRUCTION
 )

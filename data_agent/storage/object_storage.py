@@ -6,7 +6,6 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from common.config import SETTINGS
-from common.constants import PRESIGNED_URL_EXPIRED_IN
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +41,8 @@ class ObjectStorage:
                 aws_secret_access_key=self._config["secret_key"],
                 config=Config(signature_version="s3v4")
             ))
-            logger.info("Connected to object storage successfully")
 
+            logger.info("Connected to object storage successfully")
             return self
         except (BotoCoreError, ClientError) as e:
             logger.exception(f"Failed to connect to object storage: {str(e)}")
@@ -84,6 +83,7 @@ class ObjectStorage:
                 for item in page["Contents"]:
                     objects.append(item["Key"])
 
+            logger.info(f"Listed objects in bucket {bucket} using prefix {prefix}")
             return objects
         except Exception as e:
             logger.exception(f"Failed to list objects in bucket {bucket}: {e}")
@@ -108,21 +108,20 @@ class ObjectStorage:
             extra_info = {"ContentType": content_type} if content_type else {}
             await self.client.put_object(Bucket=bucket, Body=data, Key=key, **extra_info)
 
-            logger.info(f"Object uploaded to {bucket} as {key}")
+            logger.info(f"Object uploaded to bucket {bucket} as {key}")
             return True
         except Exception as e:
-            logger.exception(f"Failed to upload object {key}: {e}")
+            logger.exception(f"Failed to upload object {key} to bucket {bucket}: {e}")
             return False
 
     async def retrieve_object(self, key: str, bucket: str = None) -> bytes | None:
         bucket = bucket if bucket else self._bucket
         try:
             response = await self.client.get_object(Bucket=bucket, Key=key)
-
             async with response["Body"] as stream:
                 data = await stream.read()
 
-            logger.info(f"Data retrieved from {bucket}:{key}")
+            logger.info(f"Object {key} retrieved from bucket {bucket}")
             return data
         except Exception as e:
             logger.exception(f"Failed to retrieve object {key} from bucket {bucket}: {e}")
@@ -130,36 +129,14 @@ class ObjectStorage:
 
     async def retrieve_object_info(self, key: str, bucket: str = None) -> dict | None:
         bucket = bucket if bucket else self._bucket
-
         try:
             object_acl = await self.client.head_object(Bucket=bucket, Key=key)
 
-            logger.info(f"ACL retrieved for {bucket}:{key}")
+            logger.info(f"ACL retrieved for object {key} from bucket {bucket}")
             return object_acl
         except Exception as e:
-            logger.exception(f"Failed to retrieve ACL: {e}")
+            logger.exception(f"Failed to retrieve ACL of object {key} from bucket {bucket}: {e}")
             return None
-
-    async def get_presigned_url(
-            self,
-            key: str,
-            bucket: str = None,
-            expires_in: int = PRESIGNED_URL_EXPIRED_IN
-    ) -> str:
-        bucket = bucket if bucket else self._bucket
-
-        try:
-            response = await self.client.generate_presigned_url(
-                ClientMethod="get_object",
-                Params={"Bucket": bucket, "Key": key},
-                ExpiresIn=expires_in
-            )
-
-            logger.info(f"Generated presigned url for {key} from {bucket} which expires in {expires_in}")
-            return response
-        except Exception as e:
-            logger.exception(f"Failed to generate presigned url for {key} from bucket {bucket}: {e}")
-            raise
 
     async def delete_objects(self, keys: list[str], bucket: str = None) -> bool:
         bucket = bucket if bucket else self._bucket
@@ -167,12 +144,13 @@ class ObjectStorage:
             for i in range(0, len(keys), 1000):
                 key_bulk = keys[i:i + 1000]
                 response = await self.client.delete_objects(
-                    Bucket=bucket, Delete={"Objects": [{"Key": key} for key in key_bulk]}
+                    Bucket=bucket,
+                    Delete={"Objects": [{"Key": key} for key in key_bulk]}
                 )
 
                 deleted_keys = [obj["Key"] for obj in response.get("Deleted", [])]
-                logger.info(f"Deleted objects: {deleted_keys} from {bucket}")
+                logger.info(f"Deleted objects {deleted_keys} from bucket {bucket}")
             return True
         except Exception as e:
-            logger.exception(f"Failed to delete objects: {e}")
+            logger.exception(f"Failed to delete objects {keys} from bucket {bucket}: {e}")
             return False

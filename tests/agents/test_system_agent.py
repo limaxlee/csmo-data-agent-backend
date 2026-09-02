@@ -1,5 +1,6 @@
 from common.config import SETTINGS
-from data_agent.agents.prompts.system_agent import SYSTEM_AGENT_NAME, SYSTEM_AGENT_INSTRUCTION
+from common.constants import AgentNames
+from data_agent.agents.instructions.system_agent import SYSTEM_AGENT_INSTRUCTION
 
 MODULE = "data_agent.agents.system_agent"
 
@@ -20,7 +21,7 @@ class TestSystemAgent:
 
         adk.agent.assert_called_once_with(
             model=module.system_model,
-            name=SYSTEM_AGENT_NAME,
+            name=AgentNames.SYSTEM,
             instruction=SYSTEM_AGENT_INSTRUCTION
         )
         assert module.system_agent is adk.agent.return_value

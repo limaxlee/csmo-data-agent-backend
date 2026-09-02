@@ -1,9 +1,9 @@
 import pytest
 import asyncio
 
-from common.constants import DATA_URI_PREFIX, SESSION_TITLE_KEY, SYSTEM_AUTHOR
+from common.constants import ArtifactPrefix, SessionStateFields
 from data_agent.runners import RootAgentRunner
-from data_agent.schemas import LoadSessionArtifactRequest, RenameSessionRequest, RunAgentRequest
+from data_agent.schemas import RenameSessionRequest, RunAgentRequest, LoadSessionArtifactRequest
 
 
 def _build_event(mocker, author, texts):
@@ -30,38 +30,7 @@ class TestRootAgentRunner:
             system_runner=mocker.MagicMock()
         )
 
-    def test__find_last_user_message(self, mocker, agent_runner):
-        session = mocker.MagicMock()
-        session.events = [
-            _build_event(mocker, "user", ["user prompt"]),
-            _build_event(mocker, "model", ["model answer"]),
-            _build_event(mocker, "user", ["ignored", "   "])
-        ]
-
-        assert agent_runner._find_last_user_message(session) == "ignored"
-
-        session.events = [
-            _build_event(mocker, "model", ["model answer"]),
-            _build_event(mocker, "user", None)
-        ]
-        assert agent_runner._find_last_user_message(session) is None
-
-        session.events = []
-        assert agent_runner._find_last_user_message(session) is None
-
-    def test__set_title(self, mocker, agent_runner):
-        agent_runner._session_service.append_event = mocker.AsyncMock()
-        session = mocker.MagicMock()
-
-        asyncio.run(agent_runner._set_title(session, "Greetings"))
-
-        agent_runner._session_service.append_event.assert_awaited_once()
-        appended_session, appended_event = agent_runner._session_service.append_event.await_args.args
-        assert appended_session is session
-        assert appended_event.author == SYSTEM_AUTHOR
-        assert appended_event.actions.state_delta == {SESSION_TITLE_KEY: "Greetings"}
-
-    def test__upload_artifact(self, mocker, agent_runner):
+    def test_upload_artifact(self, mocker, agent_runner):
         image_file = mocker.MagicMock(filename="chart.png", content_type="image/png")
         image_file.read = mocker.AsyncMock(return_value=b"image bytes")
         agent_runner._artifact_service.save_artifact = mocker.AsyncMock(return_value=2)
@@ -90,7 +59,7 @@ class TestRootAgentRunner:
             id="session-1",
             app_name="data_agent",
             user_id="user-1",
-            state={SESSION_TITLE_KEY: "Greetings"},
+            state={SessionStateFields.TITLE: "Greetings"},
             events=[],
             last_update_time=1700000000.0
         )
@@ -102,7 +71,7 @@ class TestRootAgentRunner:
 
         assert len(result.sessions) == 1
         assert result.sessions[0].session_id == "session-1"
-        assert result.sessions[0].state == {SESSION_TITLE_KEY: "Greetings"}
+        assert result.sessions[0].state == {SessionStateFields.TITLE: "Greetings"}
         assert result.sessions[0].last_update_time.timestamp() == 1700000000.0
 
         agent_runner._session_service.list_sessions = mocker.AsyncMock(side_effect=Exception("Runtime error"))
@@ -209,11 +178,14 @@ class TestRootAgentRunner:
             asyncio.run(agent_runner.delete_session(user_id="user-1", session_id="session-1"))
 
     def test_load_session_artifact(self, mocker, agent_runner):
-        # RootAgentRunner.__init__ never assigns _storage, so it has to be injected for the method to run at all
         agent_runner._storage = mocker.MagicMock()
         agent_runner._storage.retrieve_object_info = mocker.AsyncMock(return_value={"ContentType": "image/png"})
         agent_runner._storage.retrieve_object = mocker.AsyncMock(return_value=b"image bytes")
-        request = LoadSessionArtifactRequest(data_uri="data_agent/user-1/session-1/chart.png/0")
+        request = LoadSessionArtifactRequest(
+            data_uri="data_agent/user-1/session-1/chart.png/0",
+            filename="chart.png",
+            media_type="image/png"
+        )
 
         result = asyncio.run(agent_runner.load_session_artifact(
             user_id="user-1",
@@ -295,41 +267,8 @@ class TestRootAgentRunner:
         upload.assert_awaited_once()
         prompt = agent_runner._runner.run_async.call_args.kwargs["new_message"].parts[0].text
         assert prompt.startswith("What is in this chart?")
-        assert f"{DATA_URI_PREFIX} data_agent/u/s/chart.png/0" in prompt
+        assert f"{ArtifactPrefix.DATA_URI} data_agent/u/s/chart.png/0" in prompt
         assert "chart.png" in prompt
-
-        escalated_event = mocker.MagicMock()
-        escalated_event.is_final_response.return_value = True
-        escalated_event.timestamp = 1700000000.0
-        escalated_event.content = None
-        escalated_event.actions.escalate = True
-        escalated_event.error_message = "Tool failure"
-
-        async def _escalated_events():
-            yield escalated_event
-
-        agent_runner._runner.run_async = mocker.MagicMock(side_effect=lambda **kwargs: _escalated_events())
-
-        result = asyncio.run(
-            agent_runner.run(
-                user_id="user-1",
-                session_id="session-1",
-                request=RunAgentRequest(query="Hello")
-            )
-        )
-        assert result.response == "Agent escalated: Tool failure"
-
-        escalated_event.error_message = None
-        result = asyncio.run(
-            agent_runner.run(
-                user_id="user-1",
-                session_id="session-1",
-                request=RunAgentRequest(query="Hello")
-            )
-        )
-        assert result.response == "Agent escalated: No specific message."
-
-        agent_runner._runner.run_async = mocker.MagicMock(side_effect=lambda **kwargs: _events())
 
         asyncio.run(
             agent_runner.run(

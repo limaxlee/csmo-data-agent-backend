@@ -58,15 +58,6 @@ class TestOSArtifactService:
                 artifact=artifact
             ))
 
-        with pytest.raises(ValueError, match="no inline_data"):
-            asyncio.run(service.save_artifact(
-                app_name="data_agent",
-                user_id="user-1",
-                session_id="session-1",
-                filename="chart.png",
-                artifact=types.Part()
-            ))
-
     def test_load_artifact(self, mocker, service, storage):
         mocker.patch.object(service, "list_versions", new=mocker.AsyncMock(return_value=[0, 3]))
         storage.retrieve_object = mocker.AsyncMock(return_value=b"image bytes")

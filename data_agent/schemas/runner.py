@@ -29,11 +29,9 @@ class CreateSessionTitleResponse(BaseModel):
 
 
 class LoadSessionArtifactRequest(BaseModel):
+    filename: str
     data_uri: str
-
-
-class LoadSessionArtifactRequest(BaseModel):
-    data_uri: str
+    media_type: str = "application/octet-stream"
 
 
 class LoadSessionArtifactResponse(BaseModel):

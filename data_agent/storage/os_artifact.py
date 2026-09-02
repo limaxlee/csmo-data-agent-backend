@@ -12,11 +12,13 @@ class OSArtifactService(BaseArtifactService):
     def __init__(self, storage: ObjectStorage):
         self._storage = storage
 
-    def get_object_key(self, app_name: str, user_id: str, session_id: str, filename: str, version: int) -> str:
-        return f"{app_name}/{user_id}/{session_id}/{filename}/{version}"
-
-    def _get_object_prefix(self, app_name: str, user_id: str, session_id: str, filename: str) -> str:
+    @staticmethod
+    def _get_object_prefix(app_name: str, user_id: str, session_id: str, filename: str) -> str:
         return f"{app_name}/{user_id}/{session_id}/{filename}"
+
+    @staticmethod
+    def get_object_key(app_name: str, user_id: str, session_id: str, filename: str, version: int) -> str:
+        return f"{app_name}/{user_id}/{session_id}/{filename}/{version}"
 
     async def save_artifact(
             self,
@@ -29,7 +31,7 @@ class OSArtifactService(BaseArtifactService):
             custom_metadata: Optional[dict[str, Any]] = None
     ) -> int:
         if artifact.inline_data is None:
-            raise ValueError(f"Artifact {filename} has no inline_data to store")
+            raise ValueError(f"User {user_id}'s session {session_id} has no artifact {filename} to upload")
 
         versions = await self.list_versions(
             app_name=app_name,
@@ -46,7 +48,7 @@ class OSArtifactService(BaseArtifactService):
             content_type=artifact.inline_data.mime_type
         )
         if not response:
-            raise RuntimeError(f"Failed to upload artifact {filename} for user {user_id}")
+            raise RuntimeError(f"Failed to upload artifact {filename} of session {session_id} for user {user_id}")
 
         logger.info(f"Uploaded artifact {filename} for user {user_id} with key {data_uri}")
         return version
@@ -79,7 +81,7 @@ class OSArtifactService(BaseArtifactService):
         data_info = await self._storage.retrieve_object_info(key=data_uri)
         mime_type = data_info.get("ContentType", "application/octet-stream")
 
-        logger.info(f"Loaded artifact {filename} for user {user_id}")
+        logger.info(f"Loaded artifact {filename} of session {session_id} for user {user_id}")
         return types.Part.from_bytes(data=data_object, mime_type=mime_type)
 
     async def list_artifact_keys(self, *, app_name: str, user_id: str, session_id: Optional[str] = None) -> list[str]:
@@ -95,7 +97,7 @@ class OSArtifactService(BaseArtifactService):
             filename, _ = session_suffix.rsplit("/", 1)
             filenames.add(filename)
 
-        logger.info(f"Listed {len(filenames)} artifact keys for user {user_id}")
+        logger.info(f"Listed {len(filenames)} artifact keys of session {session_id} for user {user_id}")
         return sorted(filenames)
 
     async def list_versions(
@@ -113,7 +115,7 @@ class OSArtifactService(BaseArtifactService):
         for data_uri in data_uris:
             suffix = data_uri[len(data_uri_prefix):]
             if not suffix.isdigit():
-                logger.warning(f"Skipping malformed artifact key {data_uri} of session {session_id} of user {user_id}")
+                logger.warning(f"Skipping incorrect artifact key {data_uri} of session {session_id} for user {user_id}")
                 continue
             versions.append(int(suffix))
 

@@ -4,11 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, status, HTTPException, Path, Depends, Request, UploadFile, File, Response
 
 from data_agent.runners import RootAgentRunner
-from data_agent.schemas import (
-    RunAgentRequest, RunAgentResponse, SessionInfo, ListSessionsResponse,
-    CreateSessionResponse, RenameSessionRequest, CreateSessionTitleResponse,
-    LoadSessionArtifactRequest
-)
+from data_agent.schemas import *
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +85,30 @@ async def rename_session_title(
 
 
 @router.get(
+    "/users/{user_id}/sessions/{session_id}/artifact",
+    response_class=Response,
+    status_code=status.HTTP_200_OK
+)
+async def load_session_artifact(
+        user_id: Annotated[str, Path()],
+        session_id: Annotated[str, Path()],
+        request: Annotated[LoadSessionArtifactRequest, Depends()],
+        agent_runner: AgentRunner
+):
+    try:
+        artifact = await agent_runner.load_session_artifact(
+            user_id=user_id,
+            session_id=session_id,
+            request=request
+        )
+        return Response(content=artifact.content, media_type=artifact.media_type)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get(
     "/users/{user_id}/sessions/{session_id}",
     response_model=SessionInfo,
     status_code=status.HTTP_200_OK
@@ -117,28 +137,6 @@ async def delete_session(
 ):
     try:
         await agent_runner.delete_session(user_id=user_id, session_id=session_id)
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-
-@router.get(
-    "/users/{user_id}/sessions/{session_id}/artifact",
-    response_class=Response,
-    status_code=status.HTTP_200_OK
-)
-async def load_session_artifact(
-        user_id: Annotated[str, Path()],
-        session_id: Annotated[str, Path()],
-        request: Annotated[LoadSessionArtifactRequest, Depends()],
-        agent_runner: AgentRunner
-):
-    try:
-        data_object = await agent_runner.load_session_artifact(
-            user_id=user_id,
-            session_id=session_id,
-            request=request
-        )
-        return Response(content=data_object.content, media_type=data_object.media_type)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 

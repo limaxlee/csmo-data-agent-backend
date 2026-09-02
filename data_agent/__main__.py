@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from common.config import SETTINGS
-from data_agent.routers import router
+from data_agent.routers import router, log_requests_middleware
 from data_agent.runners import RootAgentRunner, SystemAgentRunner
 from data_agent.storage import ObjectStorage, OSArtifactService
 from data_agent.utils import initialize_logger, shutdown_logs_executor
@@ -35,6 +35,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.middleware("http")(log_requests_middleware)
 
 if __name__ == "__main__":
     logger = initialize_logger("cosmo_data_agent.log")

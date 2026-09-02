@@ -5,6 +5,7 @@ from google.genai import types
 
 from common.constants import AppNames
 from data_agent.agents import system_agent
+from data_agent.utils.timing_plugin import TimingLoggerPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,8 @@ class SystemAgentRunner:
         self._runner = Runner(
             agent=system_agent,
             app_name=AppNames.SYSTEM,
-            session_service=self._session_service
+            session_service=self._session_service,
+            plugins=[TimingLoggerPlugin()]
         )
 
     async def create_session_title(self, user_id: str, session_id: str, user_message: str) -> str:

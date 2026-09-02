@@ -13,6 +13,7 @@ from data_agent.schemas import *
 from data_agent.runners.system_agent import SystemAgentRunner
 from data_agent.storage.os_artifact import OSArtifactService
 from data_agent.utils import convert_unix_to_datetime
+from data_agent.utils.timing_plugin import TimingLoggerPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,8 @@ class RootAgentRunner:
             agent=root_agent,
             app_name=AppNames.ROOT,
             session_service=self._session_service,
-            artifact_service=artifact_service
+            artifact_service=artifact_service,
+            plugins=[TimingLoggerPlugin()]
         )
 
     @staticmethod

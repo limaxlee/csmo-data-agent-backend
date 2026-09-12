@@ -154,3 +154,4 @@ class ObjectStorage:
         except Exception as e:
             logger.exception(f"Failed to delete objects {keys} from bucket {bucket}: {e}")
             return False
+        

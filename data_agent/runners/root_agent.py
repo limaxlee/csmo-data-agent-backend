@@ -11,6 +11,7 @@ from common.constants import SessionStateFields, ArtifactPrefix, EventAuthors, A
 from data_agent.agents import root_agent
 from data_agent.schemas import *
 from data_agent.runners.system_agent import SystemAgentRunner
+from data_agent.services.session_lock import SessionLockService, SessionBusyError, RunState
 from data_agent.storage.os_artifact import OSArtifactService
 from data_agent.utils import convert_unix_to_datetime
 from data_agent.utils.timing_plugin import TimingLoggerPlugin
@@ -22,11 +23,13 @@ class RootAgentRunner:
     def __init__(
             self,
             artifact_service: OSArtifactService,
-            system_runner: SystemAgentRunner
+            system_runner: SystemAgentRunner,
+            lock_service: SessionLockService
     ):
         self._app_name = AppNames.ROOT
         self._artifact_service = artifact_service
         self._system_runner = system_runner
+        self._lock_service = lock_service
         self._db_url = f"{SETTINGS.postgresql_db.host}:{SETTINGS.postgresql_db.port}/{SETTINGS.postgresql_db.name}"
         self._session_service = DatabaseSessionService(db_url=f"postgresql+asyncpg://postgres@{self._db_url}")
         self._runner = Runner(
@@ -86,6 +89,13 @@ class RootAgentRunner:
         try:
             result = await self._session_service.list_sessions(app_name=self._app_name, user_id=user_id)
 
+            session_ids = [session.id for session in result.sessions]
+            run_states = await self._lock_service.get_run_states(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_ids=session_ids
+            )
+
             sessions = []
             for session in result.sessions:
                 sessions.append(
@@ -95,7 +105,8 @@ class RootAgentRunner:
                         user_id=session.user_id,
                         state=session.state,
                         events=session.events,
-                        last_update_time=convert_unix_to_datetime(session.last_update_time)
+                        last_update_time=convert_unix_to_datetime(session.last_update_time),
+                        run_state=run_states.get(session.id, RunState.IDLE)
                     )
                 )
 
@@ -182,6 +193,12 @@ class RootAgentRunner:
             for event in session.events:
                 event.timestamp = convert_unix_to_datetime(event.timestamp)
 
+            run_state = await self._lock_service.get_run_state(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+
             logger.info(f"Retrieved {session_id} session info of user {user_id}")
             return SessionInfo(
                 session_id=session.id,
@@ -189,15 +206,29 @@ class RootAgentRunner:
                 user_id=session.user_id,
                 state=session.state,
                 events=session.events,
-                last_update_time=convert_unix_to_datetime(session.last_update_time)
+                last_update_time=convert_unix_to_datetime(session.last_update_time),
+                run_state=run_state
             )
         except Exception as e:
             logger.exception(f"Failed to get session {session_id} of user {user_id}: {str(e)}")
             raise
 
+    async def get_session_run_state(self, user_id: str, session_id: str) -> RunState:
+        """Lightweight state check for the frontend — no events loaded."""
+        return await self._lock_service.get_run_state(
+            app_name=self._app_name,
+            user_id=user_id,
+            session_id=session_id
+        )
+
     async def delete_session(self, user_id: str, session_id: str):
         try:
             await self._session_service.delete_session(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+            await self._lock_service.delete(
                 app_name=self._app_name,
                 user_id=user_id,
                 session_id=session_id
@@ -241,6 +272,12 @@ class RootAgentRunner:
             request: RunAgentRequest,
             image_file: UploadFile | None = None
     ) -> RunAgentResponse:
+        # Fail fast with SessionBusyError if a run is already in progress for
+        # this session. Raised BEFORE the try/finally below, so a rejected
+        # request does not release someone else's lock or trigger title creation.
+        if not await self._lock_service.try_acquire(self._app_name, user_id, session_id):
+            raise SessionBusyError(f"Session {session_id} already has a run in progress")
+
         try:
             parts = []
             if image_file is not None:
@@ -273,10 +310,24 @@ class RootAgentRunner:
             return RunAgentResponse(response=response, timestamp=convert_unix_to_datetime(timestamp))
         except Exception as e:
             logger.exception(f"Failed to run agent for session {session_id} of user {user_id}: {str(e)}")
+            session = await self._session_service.get_session(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+            if session:
+                await self._session_service.append_event(session, Event(
+                    author=EventAuthors.SYSTEM,
+                    error_code="LLM_ERROR",
+                    error_message=str(e)
+                ))
             raise
         finally:
+            await self._lock_service.release(self._app_name, user_id, session_id)
+
             if request.new_session:
                 try:
                     await self.create_session_title(user_id=user_id, session_id=session_id, user_message=request.query)
                 except Exception as e:
                     logger.exception(f"Failed to create a title for session {session_id} of user {user_id}: {str(e)}")
+

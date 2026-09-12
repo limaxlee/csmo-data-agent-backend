@@ -2,6 +2,8 @@ from typing import Any
 from datetime import datetime
 from pydantic import BaseModel
 
+from data_agent.services.session_lock import RunState
+
 
 class SessionInfo(BaseModel):
     session_id: str
@@ -10,6 +12,7 @@ class SessionInfo(BaseModel):
     state: dict[str, Any] = {}
     events: list[Any] = []
     last_update_time: datetime
+    run_state: RunState = RunState.IDLE
 
 
 class ListSessionsResponse(BaseModel):
@@ -47,3 +50,8 @@ class RunAgentRequest(BaseModel):
 class RunAgentResponse(BaseModel):
     response: str
     timestamp: datetime
+
+
+class GetRunStateResponse(BaseModel):
+    session_id: str
+    run_state: RunState

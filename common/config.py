@@ -21,11 +21,16 @@ _ENV_MAP = {
     "OBJECT_STORAGE_ENDPOINT": ("object_storage.endpoint", str),
     "OBJECT_STORAGE_ACCESS_KEY": ("object_storage.access_key", str),
     "OBJECT_STORAGE_SECRET_KEY": ("object_storage.secret_key", str),
-    "MODEL_OPENAPI_ENDPOINT": ("model_openapi.endpoint", str),
-    "MODEL_OPENAPI_CLIENT_KEY": ("model_openapi.client_key", str),
-    "MODEL_OPENAPI_PASS_KEY": ("model_openapi.pass_key", str),
-    "MODEL_OPENAPI_ROOT_MODEL_ID": ("model_openapi.root_model_id", int),
-    "MODEL_OPENAPI_SYSTEM_MODEL_ID": ("model_openapi.system_model_id", int)
+    "ROOT_MODEL_OPENAPI_MODEL": ("root_model_openapi.model", str),
+    "ROOT_MODEL_OPENAPI_ENDPOINT": ("root_model_openapi.endpoint", str),
+    "ROOT_MODEL_OPENAPI_CLIENT_KEY": ("root_model_openapi.client_key", str),
+    "ROOT_MODEL_OPENAPI_PASS_KEY": ("root_model_openapi.pass_key", str),
+    "ROOT_MODEL_OPENAPI_ROOT_MODEL_ID": ("root_model_openapi.model_id", int),
+    "SYSTEM_MODEL_OPENAPI_MODEL": ("system_model_openapi.model", str),
+    "SYSTEM_MODEL_OPENAPI_ENDPOINT": ("system_model_openapi.endpoint", str),
+    "SYSTEM_MODEL_OPENAPI_CLIENT_KEY": ("system_model_openapi.client_key", str),
+    "SYSTEM_MODEL_OPENAPI_PASS_KEY": ("system_model_openapi.pass_key", str),
+    "SYSTEM_MODEL_OPENAPI_ROOT_MODEL_ID": ("system_model_openapi.model_id", int),
 }
 
 
@@ -91,11 +96,11 @@ class ObjectStorageConfig(BaseModel):
 
 
 class ModelOpenAPI(BaseModel):
+    model: str
     endpoint: str
     client_key: str
     pass_key: str
-    root_model_id: int
-    system_model_id: int
+    model_id: int
 
 
 class Settings(BaseSettings, extra="allow"):
@@ -106,7 +111,8 @@ class Settings(BaseSettings, extra="allow"):
 
     postgresql_db: SessionDBConfig
     object_storage: ObjectStorageConfig
-    model_openapi: ModelOpenAPI
+    root_model_openapi: ModelOpenAPI
+    system_model_openapi: ModelOpenAPI
 
 
 SETTINGS = Settings(**load_config())

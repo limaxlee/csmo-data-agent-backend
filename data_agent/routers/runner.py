@@ -5,6 +5,7 @@ from fastapi import APIRouter, status, HTTPException, Path, Depends, Request, Up
 
 from data_agent.runners import RootAgentRunner
 from data_agent.schemas import *
+from data_agent.services.session_lock import SessionBusyError
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,23 @@ async def load_session_artifact(
 
 
 @router.get(
+    "/users/{user_id}/sessions/{session_id}/run-state",
+    response_model=GetRunStateResponse,
+    status_code=status.HTTP_200_OK
+)
+async def get_session_run_state(
+        user_id: Annotated[str, Path()],
+        session_id: Annotated[str, Path()],
+        agent_runner: AgentRunner
+):
+    try:
+        run_state = await agent_runner.get_session_run_state(user_id=user_id, session_id=session_id)
+        return GetRunStateResponse(session_id=session_id, run_state=run_state)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get(
     "/users/{user_id}/sessions/{session_id}",
     response_model=SessionInfo,
     status_code=status.HTTP_200_OK
@@ -164,6 +182,11 @@ async def run(
         )
         logger.info(f"[TIMING] /run API END session={session_id} elapsed={time.monotonic() - t0:.2f}s")
         return result
+    except SessionBusyError as e:
+        # A run is already in progress for this session. The frontend should
+        # keep the user's draft and show a "still responding" notice.
+        logger.info(f"[TIMING] /run REJECTED (busy) session={session_id} elapsed={time.monotonic() - t0:.2f}s")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except Exception as e:
         logger.info(f"[TIMING] /run FAILED session={session_id} elapsed={time.monotonic() - t0:.2f}s")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

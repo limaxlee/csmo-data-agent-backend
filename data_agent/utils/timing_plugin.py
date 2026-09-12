@@ -17,9 +17,6 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ARGS_LENGTH = 200
 
-# Tracks the invocation the current async task is running in, so a sub-agent
-# invocation (AgentTool runs the sub-agent's runner within the parent's tool
-# call) can be linked back to its parent for token roll-up.
 _current_invocation: ContextVar[Optional[str]] = ContextVar("timing_current_invocation", default=None)
 
 

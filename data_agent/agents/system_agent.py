@@ -6,13 +6,13 @@ from common.constants import AgentNames
 from data_agent.agents.instructions.system_agent import SYSTEM_AGENT_INSTRUCTION
 
 system_model = LiteLlm(
-    model="openai//mnt/models",
-    api_base=SETTINGS.model_openapi.endpoint + "/openapi/llm",
+    model=SETTINGS.system_model_openapi.model,
+    api_base=SETTINGS.system_model_openapi.endpoint,
     api_key="not-used",
     extra_headers={
-        "x-openapi-token": SETTINGS.model_openapi.pass_key,
-        "x-generative-ai-client": SETTINGS.model_openapi.client_key,
-        "x-llm-model-id": str(SETTINGS.model_openapi.system_model_id)
+        "x-openapi-token": SETTINGS.system_model_openapi.pass_key,
+        "x-generative-ai-client": SETTINGS.system_model_openapi.client_key,
+        "x-llm-model-id": str(SETTINGS.system_model_openapi.model_id)
     }
 )
 

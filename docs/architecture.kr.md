@@ -1,7 +1,7 @@
 # [데이터 서비스] 데이터 에이전트 — 아키텍처
 
 **Repository:** `limaxlee/csmo-data-agent-backend`
-**기준 커밋:** `main` / `9a3d572`
+**기준 커밋:** `develop1` / `50c3f11` (모듈 구조 재편, 2026-09-13)
 **관련 문서:** [roadmap.md](roadmap.md), [migration.md](migration.md), [authentication.md](authentication.md)
 **English version:** [architecture.en.md](architecture.en.md)
 
@@ -31,7 +31,7 @@
    │                                                                       │
    │  Routers:  /health    /logs    /apps/users/{user_id}/sessions/...     │
    │                                       │                               │
-   │  RootAgentRunner ─────────────────────┤                               │
+   │  AgentRunner ─────────────────────────┤                               │
    │      │                                │                               │
    │      │  ┌─────────────────────────────┴────────────────────────────┐  │
    │      │  │  Root Orchestrator (FabriX ADK Agent)                    │  │
@@ -45,7 +45,7 @@
    │      │  └───────┬─────────┘          └─────────┬────────┘             │
    │      │          │ MCP (Streamable HTTP)        │ MCP                  │
    │      │          │                              │                      │
-   │  SystemAgentRunner (대화 제목 생성)                                    │
+   │  TitleGenerator (대화 제목 생성)                                       │
    └──────┼──────────┼──────────────────────────────┼──────────────────────┘
           │          │                              │
           ▼          ▼                              ▼
@@ -53,9 +53,9 @@
    │ PostgreSQL │  │ MongoDB MCP      │   │ Milvus MCP       │
    │ (세션,     │  │ Server           │   │ Server           │
    │  이벤트,   │  └────────┬─────────┘   └────────┬─────────┘
-   │  state)    │           ▼                      ▼
-   └────────────┘  ┌──────────────────┐   ┌──────────────────┐
-                   │ MongoDB          │   │ Milvus Vector DB │
+   │  state,    │           ▼                      ▼
+   │  run lock) │  ┌──────────────────┐   ┌──────────────────┐
+   └────────────┘  │ MongoDB          │   │ Milvus Vector DB │
    ┌────────────┐  │ (모델 metadata,  │   │ (feature vector) │
    │  Object    │  │  검사 결과 요약) │   └──────────────────┘
    │  Storage   │  └──────────────────┘
@@ -74,8 +74,40 @@
 | system_agent | 대화 제목 생성 | FabriX ADK `Agent` (tool 없음) |
 | MongoDB MCP Server | `mongodb_scanner`에 MongoDB tool 제공 | 외부 서비스, Streamable HTTP |
 | Milvus MCP Server | `milvus_scanner`에 Milvus tool 제공 | 외부 서비스, Streamable HTTP |
-| PostgreSQL | Agent 세션 / 이벤트 / state 영속화 | ADK `DatabaseSessionService`, asyncpg |
+| PostgreSQL | Agent 세션 / 이벤트 / state 영속화, 세션별 run lock (`session_run_locks`) | ADK `DatabaseSessionService`, SQLAlchemy async engine + asyncpg |
 | Object Storage | 사용자가 업로드한 이미지 artifact, sampling 결과 ZIP 파일 | S3 호환, aiobotocore |
+
+### 2.3 모듈 구조
+
+```
+data_agent/
+├── __main__.py            진입점: logger 초기화 후 Uvicorn 실행
+├── app.py                 create_app() + lifespan: 모든 의존성을 생성해 app.state에 연결
+├── agents/                ADK agent (root_agent, system_agent, scanner)
+│   ├── models.py          build_model(reasoning_effort) -> root/scanner agent용 LiteLlm
+│   ├── instructions/      agent별 prompt 텍스트 + get_instruction_with_current_time()
+│   └── plugins/           TimingLoggerPlugin (run / agent / LLM / tool 소요 시간 및 token 사용량)
+├── infra/                 외부 시스템 클라이언트, 비즈니스 로직 없음
+│   ├── postgres_client.py PostgresClient (SQLAlchemy async engine) + postgres_dsn()
+│   ├── session_lock.py    SessionLockRepository (session_run_locks 테이블)
+│   ├── object_storage.py  ObjectStorage (aiobotocore S3 클라이언트)
+│   └── artifact_store.py  ObjectStorageArtifactService (ADK BaseArtifactService)
+├── services/              router가 사용하는 애플리케이션 로직
+│   ├── agent_runner.py    AgentRunner: 세션, artifact, run lock, agent 실행
+│   ├── title_generator.py TitleGenerator: in-memory 임시 세션에서 system_agent 실행
+│   └── health.py          HealthChecker: PostgreSQL / object storage probe
+├── routers/               FastAPI router: health, logs, runner (/apps)
+├── schemas/               pydantic request / response 모델
+├── middleware/            CORS + 요청/응답 로깅
+└── utils/                 logger (rotating file + /logs ZIP), datetime helper
+common/
+├── config.py              Settings (config.yaml + 환경 변수 override)
+├── constants.py           AppNames, AgentNames, EventAuthors, RunState, ArtifactPrefix 등
+└── exceptions.py          SessionBusyError
+```
+
+- 의존 방향은 `routers → services → infra`이다. `agents/`는 `app.py`와 `services/`에서만 import하며, `infra/`는 agent나 router를 알지 못한다.
+- `tests/`는 이 구조를 그대로 따른다 (`tests/infra`, `tests/services`, `tests/agents/plugins` 등). 테스트 폴더에 `__init__.py`가 없으므로 테스트 파일명은 전체 트리에서 유일해야 한다.
 
 ---
 
@@ -202,8 +234,9 @@ process_modelName_modelVersion
 
 - 이름: `system_agent` · 소스: [agents/system_agent.py](../data_agent/agents/system_agent.py)
 - 단일 목적: 첫 번째 사용자 메시지로부터 짧은 대화 제목(2–8 단어) 생성
-- `InMemorySessionService`를 사용하는 별도의 `SystemAgentRunner`에서 실행되며, 임시 세션은 제목 생성 직후 삭제된다
-- 결과는 세션 state의 `session_title` 키에 기록된다
+- `TitleGenerator`([services/title_generator.py](../data_agent/services/title_generator.py))가 `InMemorySessionService`를 사용하는 전용 ADK `Runner`에서 실행한다 — 호출마다 임시 세션을 만들고, 생성이 실패하더라도 항상 삭제한다
+- `system_model_openapi` 설정 블록으로 만든 전용 `LiteLlm`을 사용하므로 agent 모델과 독립적이다
+- 결과는 `AgentRunner`가 세션 state의 `session_title` 키에 기록한다
 - 제목은 사용자의 첫 메시지와 동일한 언어로 작성된다
 
 ---
@@ -230,27 +263,31 @@ process_modelName_modelVersion
 
 **연동 방식**
 
-- 모든 agent는 사내 OpenAPI LLM gateway를 가리키는 `LiteLlm`을 사용한다:
+- 모든 agent는 OpenAI 호환 LLM gateway를 가리키는 `LiteLlm`을 사용한다. Root orchestrator와 scanner는 [agents/models.py](../data_agent/agents/models.py)의 `build_model()`로 모델을 생성하며, 이 함수는 `root_model_openapi` 블록을 읽고 reasoning effort를 `extra_body`로 전달한다:
 
 ```python
-LiteLlm(
-    model="openai//mnt/models",
-    api_base=SETTINGS.model_openapi.endpoint + "/openapi/llm",
-    api_key="not-used",
-    extra_headers={
-        "x-openapi-token":         SETTINGS.model_openapi.pass_key,
-        "x-generative-ai-client":  SETTINGS.model_openapi.client_key,
-        "x-llm-model-id":          str(SETTINGS.model_openapi.root_model_id),
-    },
-)
+def build_model(reasoning_effort: ModelReasoningEffort) -> LiteLlm:
+    return LiteLlm(
+        model=SETTINGS.root_model_openapi.model,
+        api_base=SETTINGS.root_model_openapi.endpoint,
+        api_key="not-used",
+        extra_headers={
+            "x-openapi-token":        SETTINGS.root_model_openapi.pass_key,
+            "x-generative-ai-client": SETTINGS.root_model_openapi.client_key,
+            "x-llm-model-id":         str(SETTINGS.root_model_openapi.model_id),
+        },
+        extra_body={"reasoning_effort": reasoning_effort},
+    )
 ```
 
-| Agent | 모델 ID 설정 |
-|---|---|
-| `root_orchestrator`, `mongodb_scanner`, `milvus_scanner` | `model_openapi.root_model_id` |
-| `system_agent` | `model_openapi.system_model_id` |
+| Agent | 설정 블록 | Reasoning effort |
+|---|---|---|
+| `root_orchestrator` | `root_model_openapi` | `medium` |
+| `mongodb_scanner`, `milvus_scanner` | `root_model_openapi` | `low` |
+| `system_agent` | `system_model_openapi` — [agents/system_agent.py](../data_agent/agents/system_agent.py)에서 전용 `LiteLlm` 생성, reasoning effort 없음 | — |
 
-- [agents/llm.py](../data_agent/agents/llm.py)에는 공통화된 `build_model(reasoning_effort)` helper와 `with_current_time()` instruction wrapper(매 호출마다 현재 시각을 instruction 앞에 붙여 tool round trip을 제거)가 준비되어 있으나, 현재 활성 agent에는 아직 적용되지 않았다.
+- 두 설정 블록은 독립적이므로 제목 생성은 agent와 다른 gateway / 모델에서 실행할 수 있다.
+- [agents/instructions/\_\_init\_\_.py](../data_agent/agents/instructions/__init__.py)의 `get_instruction_with_current_time()`은 instruction 문자열을 ADK instruction provider로 감싸 매 호출마다 `CURRENT LOCAL TIME: ...`을 앞에 붙인다. 따라서 agent는 tool round trip 없이 상대 날짜를 해석한다.
 
 ---
 
@@ -293,33 +330,60 @@ LiteLlm(
 | 항목 | 값 |
 |---|---|
 | 구현 | ADK `DatabaseSessionService` |
-| 접속 문자열 | `postgresql+asyncpg://postgres@{host}:{port}/{name}` |
-| 드라이버 | `asyncpg` |
+| 접속 문자열 | `postgresql+asyncpg://{user}@{host}:{port}/{name}`, [infra/postgres_client.py](../data_agent/infra/postgres_client.py)의 `postgres_dsn()`이 생성 |
+| 드라이버 | SQLAlchemy async engine을 통한 `asyncpg` |
 | 설정 키 | `postgresql_db.host`, `.port`, `.name`, `.user` |
-| 저장 내용 | 세션, 대화 이벤트, 세션 state (`session_title` 포함) |
-| App name | `data_agent` (`ROOT_APP_NAME`) |
+| 저장 내용 | 세션, 대화 이벤트, 세션 state (`session_title` 포함), 세션 run lock |
+| App name | `data_agent` (`AppNames.ROOT`) |
 | Session ID | `uuid.uuid4().hex`, 백엔드에서 생성 |
 
 - 세션 제목은 별도 컬럼이 아니라 state delta로 반영된다:
 
 ```python
 await session_service.append_event(session, Event(
-    author=SYSTEM_AUTHOR,
-    actions=EventActions(state_delta={SESSION_TITLE_KEY: session_title})
+    author=EventAuthors.SYSTEM,
+    actions=EventActions(state_delta={SessionStateFields.TITLE: session_title})
 ))
 ```
 
+- 실패한 run도 같은 이력에 기록된다: `AgentRunner`가 `error_code="LLM_ERROR"`와 예외 메시지를 담은 `system` 이벤트를 추가하므로, 어떤 turn이 왜 답변 없이 끝났는지 세션에서 확인할 수 있다.
 - `system_agent`는 의도적으로 `InMemorySessionService`를 사용한다 — 해당 세션은 일시적이며 사용 직후 삭제된다.
+
+**세션 run lock** — [infra/session_lock.py](../data_agent/infra/session_lock.py)
+
+- `PostgresClient`는 프로세스당 하나의 SQLAlchemy async engine(`pool_size=5`, `max_overflow=5`, `pool_pre_ping=True`)을 소유하며 `execute` / `fetch_one` / `fetch_all`을 제공한다. ADK `DatabaseSessionService`는 같은 DSN으로 자체 engine을 만든다.
+- `SessionLockRepository`는 세션당 한 행을 유지한다:
+
+```sql
+CREATE TABLE IF NOT EXISTS session_run_locks (
+    app_name   TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_state  TEXT NOT NULL DEFAULT 'idle',      -- 'idle' | 'running'
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (app_name, user_id, session_id)
+)
+```
+
+| Operation | 동작 |
+|---|---|
+| `try_acquire` | 원자적 `INSERT ... ON CONFLICT DO UPDATE ... WHERE run_state = 'idle' RETURNING` 한 번; 행이 반환되지 않으면 이미 실행 중인 세션 |
+| `release` | `idle`로 변경; 절대 예외를 던지지 않으므로 release 실패가 run 자체의 결과를 가리지 않는다 |
+| `get_run_state` / `get_run_states` | 세션 하나 또는 여러 세션의 상태 조회 — `GET .../run-state`, 세션 상세, 세션 목록에서 사용 |
+| `delete` | 세션 삭제 시 행 제거 |
+| `initialize` | 시작 시 테이블 생성, `reset_session_locks`가 true이면 모든 `running` 행을 `idle`로 변경 |
+
+- Lease는 없다. 프로세스가 crash하면 해당 lock은 다음 시작 시 reset될 때까지 `running`으로 남으며, 이 reset은 백엔드 프로세스가 하나일 때만 안전하다 (§13 참고).
 
 ### 6.2 Object Storage — Artifact
 
 | 항목 | 값 |
 |---|---|
 | 프로토콜 | S3 호환 (`signature_version=s3v4`) |
-| 클라이언트 | `aiobotocore`, 앱 시작 시 연결 / 종료 시 close |
+| 클라이언트 | `ObjectStorage`([infra/object_storage.py](../data_agent/infra/object_storage.py)) — `aiobotocore`, 앱 시작 시 연결 / 종료 시 close |
 | 설정 키 | `object_storage.bucket`, `.endpoint`, `.access_key`, `.secret_key` |
-| ADK 연동 | `OSArtifactService(BaseArtifactService)` — [storage/os_artifact.py](../data_agent/storage/os_artifact.py) |
-| Presigned URL 유효기간 | 7200초 (`PRESIGNED_URL_EXPIRED_IN`) |
+| ADK 연동 | `ObjectStorageArtifactService(BaseArtifactService)` — [infra/artifact_store.py](../data_agent/infra/artifact_store.py) |
+| 기본 content type | 업로드와 `head_object` 어느 쪽도 제공하지 않으면 `application/octet-stream` (`CONTENT_TYPE`) |
 
 **Object key 구조**
 
@@ -328,8 +392,9 @@ await session_service.append_event(session, Event(
 예시:  data_agent/donghy.kim/9f2c.../defect_001.jpg/0
 ```
 
-- 버전 관리는 자동이다: `list_versions()`가 기존 정수 suffix를 읽고 새 버전은 `max + 1`이 된다.
-- `ObjectStorage`가 제공하는 기능: `list_paginated_objects`, `upload_object`, `retrieve_object`, `retrieve_object_info`, `get_presigned_url`, `delete_objects`
+- 버전 관리는 자동이다: `list_versions()`가 기존 정수 suffix를 읽고 새 버전은 `max + 1`이 된다. `parse_version()`은 그 역연산으로, 다운로드 시 `data_uri`에서 버전을 추출한다.
+- `ObjectStorage`가 제공하는 기능: `list_paginated_objects`, `upload_object`, `retrieve_object`, `retrieve_object_info`, `delete_objects`. 각 메서드는 실패 시 예외 대신 로그를 남기고 `None` / `False`를 반환한다.
+- `delete_session_artifacts()`는 세션 prefix 아래 모든 객체를 삭제하며 실패 시 예외를 던진다. `AgentRunner.delete_session`은 세션 행과 lock 행을 지우기 전에 이를 먼저 호출하므로, 삭제 실패가 객체를 고아로 남기지 않는다.
 - Content type은 업로드 시 보존되며 다운로드 시 `head_object`로 다시 읽어 사용한다.
 
 ### 6.3 MongoDB (MCP 경유)
@@ -361,6 +426,7 @@ Agent 기능의 base path: `/apps`
 | `POST` | `/apps/users/{user_id}/sessions/{session_id}/title` | — | `CreateSessionTitleResponse` | 마지막 사용자 메시지로 제목 생성 |
 | `PATCH` | `/apps/users/{user_id}/sessions/{session_id}/title` | `RenameSessionRequest` | `200 OK` | 세션 제목 수동 변경 |
 | `GET` | `/apps/users/{user_id}/sessions/{session_id}/artifact` | `LoadSessionArtifactRequest` | binary + `media_type` | Object key로 artifact 다운로드 |
+| `GET` | `/apps/users/{user_id}/sessions/{session_id}/run-state` | — | `GetRunStateResponse` | 이벤트를 로드하지 않고 run 진행 여부(`idle` / `running`)만 조회 |
 | `POST` | `/apps/users/{user_id}/sessions/{session_id}/run` | `RunAgentRequest` + 선택적 `image_file` | `RunAgentResponse` | 사용자 prompt로 agent 실행 |
 
 ### 7.2 데이터 모델
@@ -369,32 +435,35 @@ Agent 기능의 base path: `/apps`
 
 | 모델 | 필드 |
 |---|---|
-| `SessionInfo` | `session_id: str`, `app_name: str`, `user_id: str`, `state: dict`, `events: list`, `last_update_time: datetime` |
+| `SessionInfo` | `session_id: str`, `app_name: str`, `user_id: str`, `state: dict`, `events: list`, `last_update_time: datetime`, `run_state: RunState = idle` |
 | `ListSessionsResponse` | `sessions: list[SessionInfo]` |
 | `CreateSessionResponse` | `session_id: str` |
 | `RenameSessionRequest` | `session_title: str` |
 | `CreateSessionTitleResponse` | `session_title: str` |
-| `LoadSessionArtifactRequest` | `data_uri: str` |
+| `LoadSessionArtifactRequest` | `filename: str`, `data_uri: str`, `media_type: str = application/octet-stream` |
 | `LoadSessionArtifactResponse` | `content: bytes`, `media_type: str` |
 | `RunAgentRequest` | `query: str`, `new_session: bool = False` |
 | `RunAgentResponse` | `response: str`, `timestamp: datetime` |
+| `GetRunStateResponse` | `session_id: str`, `run_state: RunState` |
 | `CheckHealthStatusResponse` | `server_status: str`, `postgresql_db_status: str`, `object_storage_status: str` |
 
 **참고 사항**
 
 - `RunAgentRequest`와 `LoadSessionArtifactRequest`는 `Depends()`로 바인딩되어 있어 JSON body가 아니라 **form / query 파라미터**로 전달된다. 따라서 이미지 첨부 시 `POST /run`은 `multipart/form-data` 요청이다.
-- `POST /run`에 `new_session=true`를 전달하면 응답 생성 후 제목 생성이 자동으로 수행된다.
+- `POST /run`에 `new_session=true`를 전달하면 응답 생성 후, run lock을 아직 보유한 상태에서 제목 생성이 자동으로 수행된다.
+- 세션 목록과 세션 상세에는 run lock 테이블에서 읽은 `run_state`가 포함되므로, frontend는 새로고침 후에도 "응답 중" 상태를 표시할 수 있다. `GET .../run-state`는 이벤트를 로드하지 않고 같은 값을 반환한다.
 - ADK가 반환하는 timestamp는 Unix 값이며 `convert_unix_to_datetime`으로 변환된다.
 
 ### 7.3 에러 처리
 
 | 조건 | 상태 코드 |
 |---|---|
+| 해당 세션에 이미 run 진행 중 (`SessionBusyError` — `/run`, 제목 생성, 제목 변경에서 발생) | `409 Conflict` |
 | 세션 없음 / 잘못된 인자 (`ValueError`) | `400 Bad Request` |
 | 그 외 예외 | `500 Internal Server Error` |
-| 로그 파일 없음 (`/logs`) | `404 Not Found` |
+| 로그 파일 없음 (`/logs`) | `404 Not Found` (현재는 404가 catch-all handler 안에서 발생하므로 실제로는 `500`으로 반환됨) |
 
-- 현재 모든 router가 handler를 광범위한 `except Exception`으로 감싸고 예외 문자열을 `detail`로 반환한다. 타입이 명확한 예외로 교체하는 작업은 roadmap 이슈 #8이다.
+- `SessionBusyError`([common/exceptions.py](../common/exceptions.py))가 첫 번째 타입 예외이다. 나머지 router는 여전히 handler를 광범위한 `except Exception`으로 감싸고 예외 문자열을 `detail`로 반환하며, 이를 교체하는 작업은 roadmap 이슈 #8이다.
 
 ---
 
@@ -405,20 +474,24 @@ Agent 기능의 base path: `/apps`
 ```
  1. Frontend            POST /run  (query, new_session, image_file?)
                               │
- 2. runner.py                 ├─ app.state에서 RootAgentRunner 주입
+ 2. runner.py                 ├─ app.state에서 AgentRunner 주입
                               │
- 3. RootAgentRunner.run       ├─ image_file이 있으면:
-                              │     ├─ OSArtifactService.save_artifact()
+ 3. AgentRunner.run           ├─ SessionLockRepository.try_acquire()  ──►  PostgreSQL
+                              │     └─ 이미 실행 중  ─►  SessionBusyError  ─►  409 Conflict
+                              │
+                              ├─ image_file이 있으면:
+                              │     ├─ ObjectStorageArtifactService.save_artifact()
                               │     │     └─ ObjectStorage.upload_object()  ──►  Object Storage
                               │     └─ 텍스트 Part 추가:
                               │           "Uploaded Artifact:
-                              │            Filename: ...
-                              │            Data uri: ...
-                              │            Content type: ..."
+                              │            filename: ...
+                              │            data_uri: ...
+                              │            content_type: ..."
                               │
                               ├─ 사용자 prompt를 텍스트 Part로 추가
                               │
  4. ADK Runner.run_async      ├─ PostgreSQL에서 세션 로드
+                              │     └─ TimingLoggerPlugin이 run / agent / llm / tool의 [TIMING] START/END 기록
                               │
  5. Root Orchestrator         ├─ 의도 해석 후 경로 선택
                               │     ├─ AgentTool(mongodb_scanner) ─► MCP ─► MongoDB
@@ -428,10 +501,12 @@ Agent 기능의 base path: `/apps`
                               │
  6. ADK                       ├─ 이벤트 + state를 PostgreSQL에 저장
                               │
- 7. RootAgentRunner           ├─ 최종 응답 텍스트와 timestamp 추출
+ 7. AgentRunner               ├─ 첫 번째 final 이벤트에서 응답 텍스트와 timestamp 추출
+                              │     └─ 실패 시: system 이벤트(error_code=LLM_ERROR) 추가 후 예외 재전파
                               │
- 8. finally                   └─ new_session이면 create_session_title() 수행
-                                     └─ SystemAgentRunner ─► system_agent ─► state_delta
+ 8. finally                   ├─ new_session이면 _create_session_title() 수행
+                              │     └─ TitleGenerator ─► system_agent ─► state_delta {session_title}
+                              └─ SessionLockRepository.release()
                               │
  9. Response                  RunAgentResponse { response, timestamp }
 ```
@@ -439,13 +514,13 @@ Agent 기능의 base path: `/apps`
 ### 8.2 Artifact 다운로드
 
 - Agent 답변에는 생성된 artifact의 object key(`data_uri`)가 포함된다 — 예를 들어 coreset sampling이 생성한 ZIP 파일.
-- Frontend는 `GET /apps/users/{user_id}/sessions/{session_id}/artifact?data_uri=...`를 호출한다.
-- 백엔드는 `head_object`로 content type을 확인하고 객체를 읽어 올바른 `media_type`과 함께 raw bytes를 반환한다.
+- Frontend는 `GET /apps/users/{user_id}/sessions/{session_id}/artifact?filename=...&data_uri=...`를 호출한다 (`media_type`은 선택적 fallback).
+- 백엔드는 `data_uri`의 마지막 segment에서 버전을 추출하고, 세션 prefix 아래 `filename`의 해당 버전을 읽은 뒤 `head_object`로 content type을 확인(없으면 `media_type` 사용)하여 raw bytes를 반환한다.
 
 ### 8.3 Health check
 
-- `GET /health`는 각각 5초 timeout으로 두 가지 실제 probe를 수행한다:
-  · PostgreSQL — 연결을 맺고 `SELECT 1` 실행
+- `GET /health`는 `HealthChecker`([services/health.py](../data_agent/services/health.py))에 위임한다. `HealthChecker`는 프로세스 전역의 `PostgresClient`와 `ObjectStorage` 클라이언트를 재사용하며 각 probe를 `HEALTH_CHECK_TIMEOUT`(5초)으로 제한한다:
+  · PostgreSQL — connection pool을 통해 `SELECT 1` 실행
   · Object storage — 설정된 bucket에 `head_bucket` 호출
 - 각 항목은 독립적으로 `healthy` / `unhealthy`를 반환하며, 점검이 완료되기만 하면 endpoint 자체는 `200`을 반환한다.
 
@@ -459,13 +534,15 @@ Agent 기능의 base path: `/apps`
 | 블록 | 키 | 용도 |
 |---|---|---|
 | — | `server_port` | HTTP listen 포트 |
-| `model_openapi` | `endpoint`, `client_key`, `pass_key`, `root_model_id`, `system_model_id` | Gauss / FabriX LLM gateway |
+| — | `reset_session_locks` (기본 `true`) | 시작 시 `running` 상태의 세션 lock을 모두 `idle`로 reset; 여러 백엔드 프로세스가 같은 DB를 공유하면 반드시 `false` |
+| `root_model_openapi` | `model`, `endpoint`, `client_key`, `pass_key`, `model_id` | `root_orchestrator` 및 scanner용 LLM gateway |
+| `system_model_openapi` | `model`, `endpoint`, `client_key`, `pass_key`, `model_id` | `system_agent`(제목 생성)용 LLM gateway |
 | `mongodb_mcp` | `host`, `port` | MongoDB MCP Server endpoint |
 | `milvus_mcp` | `host`, `port` | Milvus MCP Server endpoint |
-| `postgresql_db` | `host`, `port`, `name`, `user` | Agent 세션 DB |
+| `postgresql_db` | `host`, `port`, `name`, `user` | Agent 세션 DB 및 run lock 테이블 |
 | `object_storage` | `bucket`, `endpoint`, `access_key`, `secret_key` | Artifact 저장소 |
 
-- 모든 키는 `_ENV_MAP`에 대응하는 환경 변수를 가진다 (예: `POSTGRESQL_DB_HOST`, `OBJECT_STORAGE_BUCKET`, `MODEL_OPENAPI_ROOT_MODEL_ID`). 따라서 파일 마운트 없이 컨테이너 설정이 가능하다.
+- 모든 키는 `_ENV_MAP`에 대응하는 환경 변수를 가진다 (예: `POSTGRESQL_DB_HOST`, `OBJECT_STORAGE_BUCKET`, `RESET_SESSION_LOCKS`, `ROOT_MODEL_OPENAPI_MODEL`). 따라서 파일 마운트 없이 컨테이너 설정이 가능하다. Boolean은 `1/0`, `true/false`, `yes/no`, `on/off`를 허용한다. 모델 ID 환경 변수 이름은 `ROOT_MODEL_OPENAPI_ROOT_MODEL_ID`, `SYSTEM_MODEL_OPENAPI_ROOT_MODEL_ID`이다.
 - MCP 및 DB endpoint는 환경마다 다르며, `config.yaml`의 값은 해당 파일이 배포된 환경을 의미한다.
 
 > **보안 참고.** 현재 `config.yaml`이 git에 추적되고 있으며 실제 credential을 포함한다. Credential 교체 및 파일 추적 해제는 [roadmap.md](roadmap.md)의 P0 및 이슈 #1이다.
@@ -483,20 +560,29 @@ Agent 기능의 base path: `/apps`
 | Listen 주소 | `0.0.0.0:{server_port}` |
 | 서버 | Uvicorn, 단일 worker |
 
-**애플리케이션 lifecycle** — [\_\_main\_\_.py](../data_agent/__main__.py)
+**애플리케이션 lifecycle** — [app.py](../data_agent/app.py)의 `lifespan`, [\_\_main\_\_.py](../data_agent/__main__.py)에서 시작
 
+- `__main__`은 logger를 초기화한 뒤 `data_agent.app:app`을 Uvicorn으로 `0.0.0.0:{server_port}`에서 실행한다.
 - 시작 (`lifespan`):
   · `ObjectStorage.connect()` — S3 클라이언트 오픈
-  · `RootAgentRunner(artifact_service=OSArtifactService(...), system_runner=SystemAgentRunner())` 생성
-  · 두 객체를 `app.state`에 저장하여 dependency injection에 사용
+  · `PostgresClient()` — 프로세스당 하나의 SQLAlchemy engine
+  · `SessionLockRepository.initialize()` — `session_run_locks` 테이블 생성, `reset_session_locks`가 true이면 stale lock reset
+  · `HealthChecker(db_client, object_storage)` 및 `AgentRunner(agent=root_agent, session_service=DatabaseSessionService(postgres_dsn()), artifact_service=ObjectStorageArtifactService(...), title_generator=TitleGenerator(), lock_repository=...)` 생성
+  · `object_storage`, `health_checker`, `agent_runner`를 `app.state`에 저장하며 router는 `request.app.state`로 주입받는다
 - 종료:
+  · `PostgresClient.close()` — engine dispose
   · `ObjectStorage.close()`
   · `shutdown_logs_executor()`
 
+**Middleware** — [middleware/](../data_agent/middleware/)
+
+- `CORSMiddleware`(현재 `*`, roadmap #7)와 모든 요청(`method path?query`) / 응답(상태 코드, 소요 ms)을 기록하는 HTTP middleware
+
 **로깅**
 
-- `initialize_logger("cosmo_data_agent.log")`로 초기화되며 `logs/` 하위에 기록되고 `GET /logs`로 다운로드 가능
-- `/run`은 시작 / 종료 / 실패 시점에 세션 ID와 소요 시간을 포함한 `[TIMING]` 로그를 남긴다
+- `initialize_logger("cosmo_data_agent.log")`로 초기화되며 `logs/` 하위에 기록되고(rotating, 10 MB × 20개) `GET /logs`로 다운로드 가능
+- `/run`은 시작 / 종료 / busy 거절 / 실패 시점에 세션 ID와 소요 시간을 포함한 `[TIMING]` 로그를 남긴다
+- `TimingLoggerPlugin`([agents/plugins/timing.py](../data_agent/agents/plugins/timing.py))은 두 ADK runner 모두에 연결되어 run, agent turn, LLM 호출, tool 호출마다 소요 시간과 token 사용량이 포함된 START/END 로그를 남기며, 모든 줄에 invocation id(`inv=...`)가 붙는다. 상세 내용은 [timing-logging.md](timing-logging.md) 참고.
 
 ---
 
@@ -533,7 +619,6 @@ Agent 기능의 base path: `/apps`
 | 검사 조회 time window | 쿼리당 최대 2주 |
 | 유사도 검색 결과 수 | 기본 5, 최대 10 |
 | MongoDB 응답당 레코드 수 | 최대 15 |
-| Presigned URL 유효기간 | 7200초 (2시간) |
 | Coreset sampling 지원 task | classification, detection만 |
 
 ---
@@ -549,8 +634,8 @@ Agent 기능의 base path: `/apps`
 | Feature vector | Edge 추출 pipeline 부재, 수원 서버 pipeline 필요 |
 | 데이터 sampling | Detection sampling이 classification 대비 tricky, 구현 중 |
 | 실행 모델 | `POST /run`이 동기식이며 수 분이 소요될 수 있어 긴 요청이 클라이언트를 blocking |
-| 동시성 | 단일 ADK 세션이 동시 실행에 안전하지 않음 |
-| 배포 | Uvicorn 단일 worker |
+| 동시성 | 같은 세션에 대한 동시 run은 Postgres run lock으로 `409` 거절; lock에 lease가 없어 crash한 run의 lock은 다음 시작 시 reset될 때까지 유지됨 |
+| 배포 | Uvicorn 단일 worker; 여러 프로세스가 같은 DB를 공유하기 전에 `reset_session_locks`를 `false`로 설정해야 함 |
 
 ### 13.2 향후 계획
 

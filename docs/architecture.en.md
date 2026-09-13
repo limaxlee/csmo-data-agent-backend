@@ -1,7 +1,7 @@
 # [Data Service] Data Agent — Architecture
 
 **Repository:** `limaxlee/csmo-data-agent-backend`
-**Baseline:** `main` at `9a3d572`
+**Baseline:** `develop1` at `50c3f11` (module restructure, 2026-09-13)
 **Related documents:** [roadmap.md](roadmap.md), [migration.md](migration.md), [authentication.md](authentication.md)
 **Korean version:** [architecture.kr.md](architecture.kr.md)
 
@@ -31,7 +31,7 @@
    │                                                                       │
    │  Routers:  /health    /logs    /apps/users/{user_id}/sessions/...     │
    │                                       │                               │
-   │  RootAgentRunner ─────────────────────┤                               │
+   │  AgentRunner ─────────────────────────┤                               │
    │      │                                │                               │
    │      │  ┌─────────────────────────────┴────────────────────────────┐  │
    │      │  │  Root Orchestrator (FabriX ADK Agent)                    │  │
@@ -45,7 +45,7 @@
    │      │  └───────┬─────────┘          └─────────┬────────┘             │
    │      │          │ MCP (Streamable HTTP)        │ MCP                  │
    │      │          │                              │                      │
-   │  SystemAgentRunner (title generation)                                 │
+   │  TitleGenerator (title generation)                                    │
    └──────┼──────────┼──────────────────────────────┼──────────────────────┘
           │          │                              │
           ▼          ▼                              ▼
@@ -53,9 +53,9 @@
    │ PostgreSQL │  │ MongoDB MCP      │   │ Milvus MCP       │
    │ (sessions, │  │ Server           │   │ Server           │
    │  events,   │  └────────┬─────────┘   └────────┬─────────┘
-   │  state)    │           ▼                      ▼
-   └────────────┘  ┌──────────────────┐   ┌──────────────────┐
-                   │ MongoDB          │   │ Milvus Vector DB │
+   │  state,    │           ▼                      ▼
+   │  run locks)│  ┌──────────────────┐   ┌──────────────────┐
+   └────────────┘  │ MongoDB          │   │ Milvus Vector DB │
    ┌────────────┐  │ (model metadata, │   │ (feature vectors)│
    │  Object    │  │  inspection      │   └──────────────────┘
    │  Storage   │  │  summaries)      │
@@ -74,8 +74,40 @@
 | system_agent | Conversation title generation | FabriX ADK `Agent` (no tools) |
 | MongoDB MCP Server | Exposes MongoDB tools to `mongodb_scanner` | External service, Streamable HTTP |
 | Milvus MCP Server | Exposes Milvus tools to `milvus_scanner` | External service, Streamable HTTP |
-| PostgreSQL | Agent session, event and state persistence | ADK `DatabaseSessionService`, asyncpg |
+| PostgreSQL | Agent session, event and state persistence; per-session run locks (`session_run_locks`) | ADK `DatabaseSessionService`, SQLAlchemy async engine + asyncpg |
 | Object Storage | Image artifacts uploaded by the user, sampled data ZIP files | S3-compatible, aiobotocore |
+
+### 2.3 Module layout
+
+```
+data_agent/
+├── __main__.py            entry point: initialises the logger, runs Uvicorn
+├── app.py                 create_app() + lifespan: wires every dependency into app.state
+├── agents/                ADK agents (root_agent, system_agent, scanners)
+│   ├── models.py          build_model(reasoning_effort) -> LiteLlm for the root/scanner agents
+│   ├── instructions/      prompt text per agent + get_instruction_with_current_time()
+│   └── plugins/           TimingLoggerPlugin (run / agent / LLM / tool timing and token usage)
+├── infra/                 clients for external systems, no business logic
+│   ├── postgres_client.py PostgresClient (SQLAlchemy async engine) + postgres_dsn()
+│   ├── session_lock.py    SessionLockRepository (session_run_locks table)
+│   ├── object_storage.py  ObjectStorage (aiobotocore S3 client)
+│   └── artifact_store.py  ObjectStorageArtifactService (ADK BaseArtifactService)
+├── services/              application logic used by the routers
+│   ├── agent_runner.py    AgentRunner: sessions, artifacts, run lock, agent execution
+│   ├── title_generator.py TitleGenerator: system_agent on an in-memory scratch session
+│   └── health.py          HealthChecker: PostgreSQL / object-storage probes
+├── routers/               FastAPI routers: health, logs, runner (/apps)
+├── schemas/               pydantic request / response models
+├── middleware/            CORS + request/response logging
+└── utils/                 logger (rotating file + /logs ZIP), datetime helpers
+common/
+├── config.py              Settings (config.yaml + environment overrides)
+├── constants.py           AppNames, AgentNames, EventAuthors, RunState, ArtifactPrefix, ...
+└── exceptions.py          SessionBusyError
+```
+
+- Dependency direction is `routers → services → infra`. `agents/` is imported only by `app.py` and `services/`; nothing in `infra/` knows about agents or routers.
+- `tests/` mirrors this layout (`tests/infra`, `tests/services`, `tests/agents/plugins`, ...). The test folders have no `__init__.py`, so every test file basename is unique across the tree.
 
 ---
 
@@ -202,8 +234,9 @@ example:  modelName=EpoxyClassifier, modelVersion=v1.1, process=SMD  ->  SMD_Epo
 
 - Name: `system_agent` · Source: [agents/system_agent.py](../data_agent/agents/system_agent.py)
 - Single purpose: generate a short conversation title (2–8 words) from the first user message
-- Runs on a separate `SystemAgentRunner` with `InMemorySessionService` — the temporary session is deleted immediately after the title is produced
-- Writes the result to session state under the key `session_title`
+- Runs through `TitleGenerator` ([services/title_generator.py](../data_agent/services/title_generator.py)) on its own ADK `Runner` with `InMemorySessionService` — a scratch session is created per call and always deleted afterwards, even when generation fails
+- Uses its own `LiteLlm` built from the `system_model_openapi` config block, independent of the agents' model
+- `AgentRunner` writes the result to session state under the key `session_title`
 - The title is written in the same language as the user's first message
 
 ---
@@ -230,27 +263,31 @@ Relative performance: `GaussO Flash < Gauss Think < Gauss`
 
 **Integration**
 
-- All agents use `LiteLlm` pointed at the internal OpenAPI LLM gateway:
+- All agents use `LiteLlm` pointed at an OpenAI-compatible LLM gateway. The root orchestrator and the scanners get their model from `build_model()` in [agents/models.py](../data_agent/agents/models.py), which reads the `root_model_openapi` block and passes the reasoning effort through `extra_body`:
 
 ```python
-LiteLlm(
-    model="openai//mnt/models",
-    api_base=SETTINGS.model_openapi.endpoint + "/openapi/llm",
-    api_key="not-used",
-    extra_headers={
-        "x-openapi-token":         SETTINGS.model_openapi.pass_key,
-        "x-generative-ai-client":  SETTINGS.model_openapi.client_key,
-        "x-llm-model-id":          str(SETTINGS.model_openapi.root_model_id),
-    },
-)
+def build_model(reasoning_effort: ModelReasoningEffort) -> LiteLlm:
+    return LiteLlm(
+        model=SETTINGS.root_model_openapi.model,
+        api_base=SETTINGS.root_model_openapi.endpoint,
+        api_key="not-used",
+        extra_headers={
+            "x-openapi-token":        SETTINGS.root_model_openapi.pass_key,
+            "x-generative-ai-client": SETTINGS.root_model_openapi.client_key,
+            "x-llm-model-id":         str(SETTINGS.root_model_openapi.model_id),
+        },
+        extra_body={"reasoning_effort": reasoning_effort},
+    )
 ```
 
-| Agent | Model ID setting |
-|---|---|
-| `root_orchestrator`, `mongodb_scanner`, `milvus_scanner` | `model_openapi.root_model_id` |
-| `system_agent` | `model_openapi.system_model_id` |
+| Agent | Config block | Reasoning effort |
+|---|---|---|
+| `root_orchestrator` | `root_model_openapi` | `medium` |
+| `mongodb_scanner`, `milvus_scanner` | `root_model_openapi` | `low` |
+| `system_agent` | `system_model_openapi` — its own `LiteLlm` in [agents/system_agent.py](../data_agent/agents/system_agent.py), no reasoning effort | — |
 
-- [agents/llm.py](../data_agent/agents/llm.py) contains a factored `build_model(reasoning_effort)` helper and a `with_current_time()` instruction wrapper (prepends current local time to every call, removing the need for a tool round trip). These are prepared but not yet wired into the active agents.
+- The two config blocks are independent, so title generation can run on a different gateway and model than the agents.
+- `get_instruction_with_current_time()` in [agents/instructions/\_\_init\_\_.py](../data_agent/agents/instructions/__init__.py) wraps an instruction string into an ADK instruction provider that prepends `CURRENT LOCAL TIME: ...` on every call, so an agent resolves relative dates without a tool round trip.
 
 ---
 
@@ -293,33 +330,60 @@ LiteLlm(
 | Item | Value |
 |---|---|
 | Implementation | ADK `DatabaseSessionService` |
-| Connection string | `postgresql+asyncpg://postgres@{host}:{port}/{name}` |
-| Driver | `asyncpg` |
+| Connection string | `postgresql+asyncpg://{user}@{host}:{port}/{name}`, built by `postgres_dsn()` in [infra/postgres_client.py](../data_agent/infra/postgres_client.py) |
+| Driver | `asyncpg` through a SQLAlchemy async engine |
 | Config keys | `postgresql_db.host`, `.port`, `.name`, `.user` |
-| Stored | Sessions, conversation events, session state (including `session_title`) |
-| App name key | `data_agent` (`ROOT_APP_NAME`) |
+| Stored | Sessions, conversation events, session state (including `session_title`), session run locks |
+| App name key | `data_agent` (`AppNames.ROOT`) |
 | Session ID | `uuid.uuid4().hex`, generated by the backend |
 
 - The session title is not a separate column. It is applied as a state delta:
 
 ```python
 await session_service.append_event(session, Event(
-    author=SYSTEM_AUTHOR,
-    actions=EventActions(state_delta={SESSION_TITLE_KEY: session_title})
+    author=EventAuthors.SYSTEM,
+    actions=EventActions(state_delta={SessionStateFields.TITLE: session_title})
 ))
 ```
 
+- A failed run is recorded in the same history: `AgentRunner` appends a `system` event with `error_code="LLM_ERROR"` and the exception text, so the session shows why a turn produced no answer.
 - `system_agent` deliberately uses `InMemorySessionService` instead — its sessions are transient and deleted right after use.
+
+**Session run locks** — [infra/session_lock.py](../data_agent/infra/session_lock.py)
+
+- `PostgresClient` owns the one SQLAlchemy async engine of the process (`pool_size=5`, `max_overflow=5`, `pool_pre_ping=True`) and exposes `execute` / `fetch_one` / `fetch_all`. ADK's `DatabaseSessionService` builds its own engine from the same DSN.
+- `SessionLockRepository` keeps one row per session:
+
+```sql
+CREATE TABLE IF NOT EXISTS session_run_locks (
+    app_name   TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_state  TEXT NOT NULL DEFAULT 'idle',      -- 'idle' | 'running'
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (app_name, user_id, session_id)
+)
+```
+
+| Operation | Behaviour |
+|---|---|
+| `try_acquire` | One atomic `INSERT ... ON CONFLICT DO UPDATE ... WHERE run_state = 'idle' RETURNING`; no row back means the session is already running |
+| `release` | Sets `idle`; never raises, so a failed release cannot mask the run's own outcome |
+| `get_run_state` / `get_run_states` | State of one session or of a batch — used by `GET .../run-state`, session detail and session listing |
+| `delete` | Removes the row when the session is deleted |
+| `initialize` | Creates the table at startup and, when `reset_session_locks` is true, marks every `running` row `idle` |
+
+- There is no lease. A crashed process leaves its locks `running` until the next startup reset, which is only safe while a single backend process uses the database (see §13).
 
 ### 6.2 Object Storage — artifacts
 
 | Item | Value |
 |---|---|
 | Protocol | S3-compatible (`signature_version=s3v4`) |
-| Client | `aiobotocore`, opened at application startup and closed at shutdown |
+| Client | `ObjectStorage` ([infra/object_storage.py](../data_agent/infra/object_storage.py)) — `aiobotocore`, opened at application startup and closed at shutdown |
 | Config keys | `object_storage.bucket`, `.endpoint`, `.access_key`, `.secret_key` |
-| ADK integration | `OSArtifactService(BaseArtifactService)` — [storage/os_artifact.py](../data_agent/storage/os_artifact.py) |
-| Presigned URL expiry | 7200 seconds (`PRESIGNED_URL_EXPIRED_IN`) |
+| ADK integration | `ObjectStorageArtifactService(BaseArtifactService)` — [infra/artifact_store.py](../data_agent/infra/artifact_store.py) |
+| Fallback content type | `application/octet-stream` (`CONTENT_TYPE`) whenever neither the upload nor `head_object` provides one |
 
 **Object key layout**
 
@@ -328,8 +392,9 @@ await session_service.append_event(session, Event(
 example:  data_agent/donghy.kim/9f2c.../defect_001.jpg/0
 ```
 
-- Versioning is automatic: `list_versions()` reads the existing integer suffixes and the new version becomes `max + 1`.
-- `ObjectStorage` provides: `list_paginated_objects`, `upload_object`, `retrieve_object`, `retrieve_object_info`, `get_presigned_url`, `delete_objects`.
+- Versioning is automatic: `list_versions()` reads the existing integer suffixes and the new version becomes `max + 1`. `parse_version()` is the inverse and resolves the version from a `data_uri` on download.
+- `ObjectStorage` provides: `list_paginated_objects`, `upload_object`, `retrieve_object`, `retrieve_object_info`, `delete_objects`. Each method logs and returns `None` / `False` on failure instead of raising.
+- `delete_session_artifacts()` removes every object under the session prefix and raises on failure. `AgentRunner.delete_session` calls it before deleting the session row and the lock row, so a failed delete never orphans objects.
 - Content type is preserved on upload and read back from `head_object` on download.
 
 ### 6.3 MongoDB (via MCP)
@@ -361,6 +426,7 @@ Base path for agent operations: `/apps`
 | `POST` | `/apps/users/{user_id}/sessions/{session_id}/title` | — | `CreateSessionTitleResponse` | Generate a title from the last user message |
 | `PATCH` | `/apps/users/{user_id}/sessions/{session_id}/title` | `RenameSessionRequest` | `200 OK` | Rename the session title manually |
 | `GET` | `/apps/users/{user_id}/sessions/{session_id}/artifact` | `LoadSessionArtifactRequest` | binary + `media_type` | Download an artifact by its object key |
+| `GET` | `/apps/users/{user_id}/sessions/{session_id}/run-state` | — | `GetRunStateResponse` | Whether a run is in progress (`idle` / `running`), without loading events |
 | `POST` | `/apps/users/{user_id}/sessions/{session_id}/run` | `RunAgentRequest` + optional `image_file` | `RunAgentResponse` | Execute the agent on a user prompt |
 
 ### 7.2 Data models
@@ -369,32 +435,35 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
 
 | Model | Fields |
 |---|---|
-| `SessionInfo` | `session_id: str`, `app_name: str`, `user_id: str`, `state: dict`, `events: list`, `last_update_time: datetime` |
+| `SessionInfo` | `session_id: str`, `app_name: str`, `user_id: str`, `state: dict`, `events: list`, `last_update_time: datetime`, `run_state: RunState = idle` |
 | `ListSessionsResponse` | `sessions: list[SessionInfo]` |
 | `CreateSessionResponse` | `session_id: str` |
 | `RenameSessionRequest` | `session_title: str` |
 | `CreateSessionTitleResponse` | `session_title: str` |
-| `LoadSessionArtifactRequest` | `data_uri: str` |
+| `LoadSessionArtifactRequest` | `filename: str`, `data_uri: str`, `media_type: str = application/octet-stream` |
 | `LoadSessionArtifactResponse` | `content: bytes`, `media_type: str` |
 | `RunAgentRequest` | `query: str`, `new_session: bool = False` |
 | `RunAgentResponse` | `response: str`, `timestamp: datetime` |
+| `GetRunStateResponse` | `session_id: str`, `run_state: RunState` |
 | `CheckHealthStatusResponse` | `server_status: str`, `postgresql_db_status: str`, `object_storage_status: str` |
 
 **Notes**
 
 - `RunAgentRequest` and `LoadSessionArtifactRequest` are bound with `Depends()`, so they arrive as **form / query parameters**, not as a JSON body. `POST /run` is therefore a `multipart/form-data` request when an image is attached.
-- `POST /run` with `new_session=true` triggers title generation automatically after the response is produced.
+- `POST /run` with `new_session=true` triggers title generation automatically after the response is produced, while the run lock is still held.
+- Session listing and session detail carry `run_state`, read from the run-lock table, so the frontend can show a "still responding" state after a reload. `GET .../run-state` returns the same value without loading the events.
 - Timestamps returned by ADK are Unix values and are converted with `convert_unix_to_datetime`.
 
 ### 7.3 Error handling
 
 | Condition | Status |
 |---|---|
+| A run is already in progress for the session (`SessionBusyError` — raised by `/run`, title generation and rename) | `409 Conflict` |
 | Session not found / invalid argument (`ValueError`) | `400 Bad Request` |
 | Any other exception | `500 Internal Server Error` |
-| No log files present (`/logs`) | `404 Not Found` |
+| No log files present (`/logs`) | `404 Not Found` (currently surfaces as `500` because the 404 is raised inside the catch-all handler) |
 
-- All routers currently wrap handlers in a broad `except Exception` and return the exception text as `detail`. Replacing this with typed exceptions is roadmap issue #8.
+- `SessionBusyError` ([common/exceptions.py](../common/exceptions.py)) is the first typed exception. All other routers still wrap handlers in a broad `except Exception` and return the exception text as `detail`; replacing that is roadmap issue #8.
 
 ---
 
@@ -405,20 +474,24 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
 ```
  1. Frontend            POST /run  (query, new_session, image_file?)
                               │
- 2. runner.py                 ├─ resolve RootAgentRunner from app.state
+ 2. runner.py                 ├─ resolve AgentRunner from app.state
                               │
- 3. RootAgentRunner.run       ├─ if image_file:
-                              │     ├─ OSArtifactService.save_artifact()
+ 3. AgentRunner.run           ├─ SessionLockRepository.try_acquire()  ──►  PostgreSQL
+                              │     └─ already running  ─►  SessionBusyError  ─►  409 Conflict
+                              │
+                              ├─ if image_file:
+                              │     ├─ ObjectStorageArtifactService.save_artifact()
                               │     │     └─ ObjectStorage.upload_object()  ──►  Object Storage
                               │     └─ append a text Part:
                               │           "Uploaded Artifact:
-                              │            Filename: ...
-                              │            Data uri: ...
-                              │            Content type: ..."
+                              │            filename: ...
+                              │            data_uri: ...
+                              │            content_type: ..."
                               │
                               ├─ append the user prompt as a text Part
                               │
  4. ADK Runner.run_async      ├─ load session from PostgreSQL
+                              │     └─ TimingLoggerPlugin logs [TIMING] START/END for run, agent, llm, tool
                               │
  5. Root Orchestrator         ├─ interpret intent, select route
                               │     ├─ AgentTool(mongodb_scanner) ─► MCP ─► MongoDB
@@ -428,10 +501,12 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
                               │
  6. ADK                       ├─ persist events + state to PostgreSQL
                               │
- 7. RootAgentRunner           ├─ extract the final response text and timestamp
+ 7. AgentRunner               ├─ take the first final event: response text + timestamp
+                              │     └─ on failure: append a system event (error_code=LLM_ERROR), re-raise
                               │
- 8. finally                   └─ if new_session: create_session_title()
-                                     └─ SystemAgentRunner ─► system_agent ─► state_delta
+ 8. finally                   ├─ if new_session: _create_session_title()
+                              │     └─ TitleGenerator ─► system_agent ─► state_delta {session_title}
+                              └─ SessionLockRepository.release()
                               │
  9. Response                  RunAgentResponse { response, timestamp }
 ```
@@ -439,14 +514,14 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
 ### 8.2 Artifact download
 
 - The agent's answer embeds the object key (`data_uri`) of any produced artifact — for example the ZIP file created by coreset sampling.
-- The frontend calls `GET /apps/users/{user_id}/sessions/{session_id}/artifact?data_uri=...`.
-- The backend reads the content type via `head_object`, fetches the object, and returns the raw bytes with the correct `media_type`.
+- The frontend calls `GET /apps/users/{user_id}/sessions/{session_id}/artifact?filename=...&data_uri=...` (`media_type` is an optional fallback).
+- The backend parses the version from the last segment of `data_uri`, loads that version of `filename` from the session prefix, reads the content type via `head_object` (falling back to `media_type`), and returns the raw bytes.
 
 ### 8.3 Health check
 
-- `GET /health` performs two live probes with a 5-second timeout each:
-  · PostgreSQL — opens a connection and runs `SELECT 1`
-  · Object storage — issues `head_bucket` against the configured bucket
+- `GET /health` delegates to `HealthChecker` ([services/health.py](../data_agent/services/health.py)), which reuses the process-wide `PostgresClient` and `ObjectStorage` clients and bounds each probe with `HEALTH_CHECK_TIMEOUT` (5 seconds):
+  · PostgreSQL — `SELECT 1` through the connection pool
+  · Object storage — `head_bucket` against the configured bucket
 - Each returns `healthy` / `unhealthy` independently; the endpoint itself returns `200` as long as the checks complete.
 
 ---
@@ -459,13 +534,15 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
 | Block | Keys | Purpose |
 |---|---|---|
 | — | `server_port` | HTTP listen port |
-| `model_openapi` | `endpoint`, `client_key`, `pass_key`, `root_model_id`, `system_model_id` | Gauss / FabriX LLM gateway |
+| — | `reset_session_locks` (default `true`) | Reset every `running` session lock to `idle` at startup; must be `false` when more than one backend process shares the database |
+| `root_model_openapi` | `model`, `endpoint`, `client_key`, `pass_key`, `model_id` | LLM gateway for `root_orchestrator` and the scanners |
+| `system_model_openapi` | `model`, `endpoint`, `client_key`, `pass_key`, `model_id` | LLM gateway for `system_agent` (title generation) |
 | `mongodb_mcp` | `host`, `port` | MongoDB MCP Server endpoint |
 | `milvus_mcp` | `host`, `port` | Milvus MCP Server endpoint |
-| `postgresql_db` | `host`, `port`, `name`, `user` | Agent session database |
+| `postgresql_db` | `host`, `port`, `name`, `user` | Agent session database and run-lock table |
 | `object_storage` | `bucket`, `endpoint`, `access_key`, `secret_key` | Artifact storage |
 
-- Every key has a corresponding environment variable in `_ENV_MAP` (for example `POSTGRESQL_DB_HOST`, `OBJECT_STORAGE_BUCKET`, `MODEL_OPENAPI_ROOT_MODEL_ID`), so a container can be configured without mounting a file.
+- Every key has a corresponding environment variable in `_ENV_MAP` (for example `POSTGRESQL_DB_HOST`, `OBJECT_STORAGE_BUCKET`, `RESET_SESSION_LOCKS`, `ROOT_MODEL_OPENAPI_MODEL`), so a container can be configured without mounting a file. Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`. Note that the model-id variables are named `ROOT_MODEL_OPENAPI_ROOT_MODEL_ID` and `SYSTEM_MODEL_OPENAPI_ROOT_MODEL_ID`.
 - MCP and database endpoints differ per environment; the values in `config.yaml` describe the environment that file is deployed to.
 
 > **Security note.** `config.yaml` is currently tracked in git and contains live credentials. Rotating those credentials and untracking the file are P0 and issue #1 in [roadmap.md](roadmap.md).
@@ -483,20 +560,29 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
 | Listen address | `0.0.0.0:{server_port}` |
 | Server | Uvicorn, single worker |
 
-**Application lifecycle** — [\_\_main\_\_.py](../data_agent/__main__.py)
+**Application lifecycle** — [app.py](../data_agent/app.py) (`lifespan`), started from [\_\_main\_\_.py](../data_agent/__main__.py)
 
+- `__main__` initialises the logger and runs `data_agent.app:app` with Uvicorn on `0.0.0.0:{server_port}`.
 - Startup (`lifespan`):
   · `ObjectStorage.connect()` — opens the S3 client
-  · Constructs `RootAgentRunner(artifact_service=OSArtifactService(...), system_runner=SystemAgentRunner())`
-  · Stores both on `app.state` for dependency injection
+  · `PostgresClient()` — the one SQLAlchemy engine of the process
+  · `SessionLockRepository.initialize()` — creates `session_run_locks` and resets stale locks when `reset_session_locks` is true
+  · Builds `HealthChecker(db_client, object_storage)` and `AgentRunner(agent=root_agent, session_service=DatabaseSessionService(postgres_dsn()), artifact_service=ObjectStorageArtifactService(...), title_generator=TitleGenerator(), lock_repository=...)`
+  · Stores `object_storage`, `health_checker` and `agent_runner` on `app.state`; routers resolve them through `request.app.state`
 - Shutdown:
+  · `PostgresClient.close()` — disposes the engine
   · `ObjectStorage.close()`
   · `shutdown_logs_executor()`
 
+**Middleware** — [middleware/](../data_agent/middleware/)
+
+- `CORSMiddleware` (currently `*`, roadmap #7) and an HTTP middleware that logs every request (`method path?query`) and response (status, elapsed ms).
+
 **Logging**
 
-- Initialised by `initialize_logger("cosmo_data_agent.log")`, written under `logs/` and downloadable through `GET /logs`
-- `/run` emits `[TIMING]` log lines at start, end and failure, carrying the session ID and elapsed seconds
+- Initialised by `initialize_logger("cosmo_data_agent.log")`, written under `logs/` (rotating, 10 MB × 20 files) and downloadable through `GET /logs`
+- `/run` emits `[TIMING]` log lines at start, end, busy rejection and failure, carrying the session ID and elapsed seconds
+- `TimingLoggerPlugin` ([agents/plugins/timing.py](../data_agent/agents/plugins/timing.py)) is attached to both ADK runners and logs START/END lines with elapsed time and token usage for every run, agent turn, LLM call and tool call, all tagged with the invocation id (`inv=...`). Details in [timing-logging.md](timing-logging.md).
 
 ---
 
@@ -532,7 +618,6 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
 | Inspection query time window | Maximum 2 weeks per query |
 | Similarity search results | Default 5, hard maximum 10 |
 | MongoDB records per response | Maximum 15 |
-| Presigned URL validity | 7200 seconds (2 hours) |
 | Coreset sampling task support | Classification and detection only |
 
 ---
@@ -548,8 +633,8 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
 | Feature vectors | No edge-side extraction pipeline; a Suwon-server pipeline is required |
 | Data sampling | Detection sampling is trickier than classification; implementation in progress |
 | Execution model | `POST /run` is synchronous and can take minutes; a long request blocks the client |
-| Concurrency | A single ADK session is not safe against concurrent runs |
-| Deployment | Single Uvicorn worker |
+| Concurrency | Concurrent runs on the same session are rejected with `409` through the Postgres run lock; the lock has no lease, so a crashed run holds it until the next startup reset |
+| Deployment | Single Uvicorn worker; `reset_session_locks` must be `false` before more than one process shares the database |
 
 ### 13.2 Planned work
 

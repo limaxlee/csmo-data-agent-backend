@@ -2,7 +2,7 @@ from typing import Any
 from datetime import datetime
 from pydantic import BaseModel
 
-from data_agent.services.session_lock import RunState
+from common.constants import RunState, CONTENT_TYPE
 
 
 class SessionInfo(BaseModel):
@@ -34,7 +34,7 @@ class CreateSessionTitleResponse(BaseModel):
 class LoadSessionArtifactRequest(BaseModel):
     filename: str
     data_uri: str
-    media_type: str = "application/octet-stream"
+    media_type: str = CONTENT_TYPE
 
 
 class LoadSessionArtifactResponse(BaseModel):

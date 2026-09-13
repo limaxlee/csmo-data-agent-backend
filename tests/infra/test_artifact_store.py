@@ -2,17 +2,18 @@ import pytest
 import asyncio
 from google.genai import types
 
-from data_agent.storage import OSArtifactService
+from common.constants import CONTENT_TYPE
+from data_agent.infra import ObjectStorageArtifactService
 
 
-class TestOSArtifactService:
+class TestObjectStorageArtifactService:
     @pytest.fixture
     def storage(self, mocker):
         return mocker.MagicMock()
 
     @pytest.fixture
     def service(self, storage):
-        return OSArtifactService(storage=storage)
+        return ObjectStorageArtifactService(storage=storage)
 
     def test_get_object_key(self, service):
         key = service.get_object_key("data_agent", "user-1", "session-1", "chart.png", 2)
@@ -21,6 +22,17 @@ class TestOSArtifactService:
     def test__get_object_prefix(self, service):
         prefix = service._get_object_prefix("data_agent", "user-1", "session-1", "chart.png")
         assert prefix == "data_agent/user-1/session-1/chart.png"
+
+    def test_parse_version(self, service):
+        assert service.parse_version("data_agent/user-1/session-1/chart.png/2") == 2
+        assert service.parse_version("data_agent/user-1/session-1/chart.png/12") == 12
+        assert service.parse_version(service.get_object_key("data_agent", "user-1", "session-1", "a/b.png", 0)) == 0
+
+        with pytest.raises(ValueError, match="has no version segment"):
+            service.parse_version("data_agent/user-1/session-1/chart.png/latest")
+
+        with pytest.raises(ValueError, match="has no version segment"):
+            service.parse_version("data_agent/user-1/session-1/chart.png/")
 
     def test_save_artifact(self, mocker, service, storage):
         artifact = types.Part.from_bytes(data=b"image bytes", mime_type="image/png")
@@ -36,6 +48,7 @@ class TestOSArtifactService:
         ))
 
         assert version == 2
+        assert storage.upload_object.await_args.kwargs["file_object"] == b"image bytes"
         assert storage.upload_object.await_args.kwargs["key"] == "data_agent/user-1/session-1/chart.png/2"
         assert storage.upload_object.await_args.kwargs["content_type"] == "image/png"
 
@@ -80,6 +93,7 @@ class TestOSArtifactService:
         ))
 
         assert storage.retrieve_object.await_args.kwargs["key"] == "data_agent/user-1/session-1/chart.png/3"
+        assert storage.retrieve_object_info.await_args.kwargs["key"] == "data_agent/user-1/session-1/chart.png/3"
         assert part.inline_data.data == b"image bytes"
         assert part.inline_data.mime_type == "image/png"
 
@@ -100,7 +114,28 @@ class TestOSArtifactService:
             filename="chart.png",
             version=0
         ))
-        assert part.inline_data.mime_type == "application/octet-stream"
+        assert part.inline_data.mime_type == CONTENT_TYPE
+
+        storage.retrieve_object_info = mocker.AsyncMock(return_value={"ContentType": None})
+        part = asyncio.run(service.load_artifact(
+            app_name="data_agent",
+            user_id="user-1",
+            session_id="session-1",
+            filename="chart.png",
+            version=0
+        ))
+        assert part.inline_data.mime_type == CONTENT_TYPE
+
+        storage.retrieve_object_info = mocker.AsyncMock(return_value=None)
+        part = asyncio.run(service.load_artifact(
+            app_name="data_agent",
+            user_id="user-1",
+            session_id="session-1",
+            filename="chart.png",
+            version=0
+        ))
+        assert part.inline_data.data == b"image bytes"
+        assert part.inline_data.mime_type == CONTENT_TYPE
 
         storage.retrieve_object = mocker.AsyncMock(return_value=None)
         assert asyncio.run(service.load_artifact(
@@ -214,6 +249,56 @@ class TestOSArtifactService:
                 user_id="user-1",
                 session_id="session-1",
                 filename="chart.png"
+            ))
+
+    def test_delete_session_artifacts(self, mocker, service, storage):
+        keys = [
+            "data_agent/user-1/session-1/chart.png/0",
+            "data_agent/user-1/session-1/chart.png/1",
+            "data_agent/user-1/session-1/reports/summary.pdf/0"
+        ]
+        storage.list_paginated_objects = mocker.AsyncMock(return_value=keys)
+        storage.delete_objects = mocker.AsyncMock(return_value=True)
+
+        deleted = asyncio.run(service.delete_session_artifacts(
+            app_name="data_agent",
+            user_id="user-1",
+            session_id="session-1"
+        ))
+
+        assert deleted == 3
+        assert storage.list_paginated_objects.await_args.kwargs["prefix"] == "data_agent/user-1/session-1/"
+        assert storage.delete_objects.await_args.kwargs["keys"] == keys
+
+        storage.list_paginated_objects = mocker.AsyncMock(return_value=[])
+        storage.delete_objects = mocker.AsyncMock(return_value=True)
+        assert asyncio.run(service.delete_session_artifacts(
+            app_name="data_agent",
+            user_id="user-1",
+            session_id="session-1"
+        )) == 0
+        storage.delete_objects.assert_not_awaited()
+
+    def test_delete_session_artifacts_raises_on_storage_failure(self, mocker, service, storage):
+        storage.list_paginated_objects = mocker.AsyncMock(return_value=None)
+        storage.delete_objects = mocker.AsyncMock(return_value=True)
+
+        with pytest.raises(RuntimeError, match="Failed to list artifacts"):
+            asyncio.run(service.delete_session_artifacts(
+                app_name="data_agent",
+                user_id="user-1",
+                session_id="session-1"
+            ))
+        storage.delete_objects.assert_not_awaited()
+
+        storage.list_paginated_objects = mocker.AsyncMock(return_value=["data_agent/user-1/session-1/chart.png/0"])
+        storage.delete_objects = mocker.AsyncMock(return_value=False)
+
+        with pytest.raises(RuntimeError, match="Failed to delete artifacts"):
+            asyncio.run(service.delete_session_artifacts(
+                app_name="data_agent",
+                user_id="user-1",
+                session_id="session-1"
             ))
 
     def test_list_artifact_versions(self, service):

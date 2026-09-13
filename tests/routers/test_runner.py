@@ -4,6 +4,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette import status
 
+from common.constants import RunState
+from common.exceptions import SessionBusyError
 from data_agent.routers.runner import get_agent_runner, router
 from data_agent.schemas import (
     CreateSessionResponse, CreateSessionTitleResponse, ListSessionsResponse,
@@ -50,6 +52,7 @@ class TestRunnerRoutes:
 
         assert response.status_code == status.HTTP_200_OK
         assert [session["session_id"] for session in response.json()["sessions"]] == ["session-1"]
+        assert response.json()["sessions"][0]["run_state"] == RunState.IDLE
         assert agent_runner.list_sessions.await_args.kwargs["user_id"] == "user-1"
 
         agent_runner.list_sessions = mocker.AsyncMock(side_effect=Exception("Runtime error"))
@@ -84,6 +87,11 @@ class TestRunnerRoutes:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert response.json()["detail"] == "Invalid session"
 
+        agent_runner.create_session_title = mocker.AsyncMock(side_effect=SessionBusyError("Session busy"))
+        response = client.post("/apps/users/user-1/sessions/session-1/title")
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert response.json()["detail"] == "Session busy"
+
         agent_runner.create_session_title = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         assert client.post("/apps/users/user-1/sessions/session-1/title").status_code == \
                status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -103,6 +111,10 @@ class TestRunnerRoutes:
         response = client.patch("/apps/users/user-1/sessions/session-1/title?session_title=Inquiry")
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
+        agent_runner.rename_session_title = mocker.AsyncMock(side_effect=SessionBusyError("Session busy"))
+        response = client.patch("/apps/users/user-1/sessions/session-1/title?session_title=Inquiry")
+        assert response.status_code == status.HTTP_409_CONFLICT
+
         agent_runner.rename_session_title = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         response = client.patch("/apps/users/user-1/sessions/session-1/title?session_title=Inquiry")
         assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -121,6 +133,25 @@ class TestRunnerRoutes:
 
         agent_runner.get_session = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         assert client.get("/apps/users/user-1/sessions/session-1").status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    def test_get_session_run_state(self, mocker, client, agent_runner):
+        agent_runner.get_session_run_state = mocker.AsyncMock(return_value=RunState.RUNNING)
+
+        response = client.get("/apps/users/user-1/sessions/session-1/run-state")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == {"session_id": "session-1", "run_state": "running"}
+        assert agent_runner.get_session_run_state.await_args.kwargs["user_id"] == "user-1"
+        assert agent_runner.get_session_run_state.await_args.kwargs["session_id"] == "session-1"
+
+        agent_runner.get_session_run_state = mocker.AsyncMock(return_value=RunState.IDLE)
+        response = client.get("/apps/users/user-1/sessions/session-1/run-state")
+        assert response.json()["run_state"] == "idle"
+
+        agent_runner.get_session_run_state = mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        response = client.get("/apps/users/user-1/sessions/session-1/run-state")
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"] == "Runtime error"
 
     def test_delete_session(self, mocker, client, agent_runner):
         agent_runner.delete_session = mocker.AsyncMock()
@@ -152,6 +183,13 @@ class TestRunnerRoutes:
         assert client.get("/apps/users/user-1/sessions/session-1/artifact").status_code == \
                status.HTTP_422_UNPROCESSABLE_CONTENT
 
+        agent_runner.load_session_artifact = mocker.AsyncMock(side_effect=ValueError("No data found"))
+        response = client.get(
+            "/apps/users/user-1/sessions/session-1/artifact?data_uri=missing&filename=image.png&media_type=image/jpeg"
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.json()["detail"] == "No data found"
+
         agent_runner.load_session_artifact = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         response = client.get(
             "/apps/users/user-1/sessions/session-1/artifact?data_uri=missing&filename=image.png&media_type=image/jpeg"
@@ -165,7 +203,7 @@ class TestRunnerRoutes:
 
         response = client.post("/apps/users/user-1/sessions/session-1/run?query=How%20many%20models%3F")
 
-        assert response.status_code == 200
+        assert response.status_code == status.HTTP_200_OK
         assert response.json()["response"] == "42 models"
         assert agent_runner.run.await_args.kwargs["request"].query == "How many models?"
         assert agent_runner.run.await_args.kwargs["request"].new_session is False
@@ -181,6 +219,11 @@ class TestRunnerRoutes:
 
         assert client.post("/apps/users/user-1/sessions/session-1/run").status_code == \
             status.HTTP_422_UNPROCESSABLE_CONTENT
+
+        agent_runner.run = mocker.AsyncMock(side_effect=SessionBusyError("Session busy"))
+        response = client.post("/apps/users/user-1/sessions/session-1/run?query=How%20many%20models%3F")
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert response.json()["detail"] == "Session busy"
 
         agent_runner.run = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         response = client.post("/apps/users/user-1/sessions/session-1/run?query=How%20many%20models%3F")

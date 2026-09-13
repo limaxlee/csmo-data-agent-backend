@@ -5,7 +5,7 @@ from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 from common.config import SETTINGS
 from common.constants import ModelReasoningEffort, AgentNames
 from data_agent.agents.instructions import MILVUS_AGENT_INSTRUCTION
-from data_agent.agents.llm import build_model
+from data_agent.agents.models import build_model
 
 milvus_agent = Agent(
     model=build_model(ModelReasoningEffort.LOW),

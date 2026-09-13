@@ -2,7 +2,8 @@ import pytest
 import asyncio
 from botocore.exceptions import ClientError
 
-from data_agent.storage import ObjectStorage
+from common.config import SETTINGS
+from data_agent.infra import ObjectStorage
 
 
 class TestObjectStorage:
@@ -11,6 +12,11 @@ class TestObjectStorage:
         storage = ObjectStorage()
         storage._client = mocker.MagicMock()
         return storage
+
+    def test_bucket(self):
+        storage = ObjectStorage()
+
+        assert storage.bucket == SETTINGS.object_storage.bucket
 
     def test_client(self, mocker):
         storage = ObjectStorage()
@@ -32,6 +38,10 @@ class TestObjectStorage:
         assert asyncio.run(storage.connect()) is storage
         assert storage.client is client
         storage._session.create_client.assert_called_once()
+        kwargs = storage._session.create_client.call_args.kwargs
+        assert kwargs["endpoint_url"] == SETTINGS.object_storage.endpoint
+        assert kwargs["aws_access_key_id"] == SETTINGS.object_storage.access_key
+        assert kwargs["aws_secret_access_key"] == SETTINGS.object_storage.secret_key
 
         assert asyncio.run(storage.connect()) is storage
         storage._session.create_client.assert_called_once()
@@ -68,12 +78,19 @@ class TestObjectStorage:
             yield {"KeyCount": 2, "Contents": [{"Key": "prefix/a"}, {"Key": "prefix/b"}]}
 
         paginator = mocker.MagicMock()
-        paginator.paginate = mocker.MagicMock(return_value=_pages())
+        paginator.paginate = mocker.MagicMock(side_effect=lambda **kwargs: _pages())
         storage._client.get_paginator.return_value = paginator
 
         assert asyncio.run(storage.list_paginated_objects(prefix="prefix/")) == ["prefix/a", "prefix/b"]
+        assert paginator.paginate.call_args.kwargs["Bucket"] == storage.bucket
         assert paginator.paginate.call_args.kwargs["Prefix"] == "prefix/"
+        assert paginator.paginate.call_args.kwargs["PaginationConfig"] == {}
+
+        assert asyncio.run(storage.list_paginated_objects(prefix="prefix/", max_items=100)) == ["prefix/a", "prefix/b"]
         assert paginator.paginate.call_args.kwargs["PaginationConfig"] == {"MaxItems": 100}
+
+        asyncio.run(storage.list_paginated_objects(bucket="other-bucket"))
+        assert paginator.paginate.call_args.kwargs["Bucket"] == "other-bucket"
 
         storage._client.get_paginator.side_effect = Exception("boom")
         assert asyncio.run(storage.list_paginated_objects()) is None

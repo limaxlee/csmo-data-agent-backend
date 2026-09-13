@@ -5,7 +5,7 @@ from common.constants import ModelReasoningEffort, AgentNames
 from data_agent.agents.instructions import (
     ROOT_AGENT_DESCRIPTION, ROOT_AGENT_INSTRUCTION, get_instruction_with_current_time
 )
-from data_agent.agents.llm import build_model
+from data_agent.agents.models import build_model
 from data_agent.agents.milvus_scanner import milvus_agent
 from data_agent.agents.mongodb_scanner import mongodb_agent
 

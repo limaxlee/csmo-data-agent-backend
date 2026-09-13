@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette import status
 
-from data_agent.routers import log_requests_middleware
+from data_agent.middleware.logging import log_requests_middleware
 
 
 class TestLogRequestsMiddleware:
@@ -21,7 +21,7 @@ class TestLogRequestsMiddleware:
     def test_logs_request_and_response(self, caplog):
         client = self._build_client()
 
-        with caplog.at_level(logging.INFO, logger="data_agent.routers"):
+        with caplog.at_level(logging.INFO, logger="data_agent.middleware"):
             response = client.get("/ping?user=user-1")
 
         assert response.status_code == status.HTTP_200_OK
@@ -33,7 +33,7 @@ class TestLogRequestsMiddleware:
     def test_logs_error_response_status(self, caplog):
         client = self._build_client()
 
-        with caplog.at_level(logging.INFO, logger="data_agent.routers"):
+        with caplog.at_level(logging.INFO, logger="data_agent.middleware"):
             response = client.get("/missing")
 
         assert response.status_code == status.HTTP_404_NOT_FOUND

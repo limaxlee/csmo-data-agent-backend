@@ -1,50 +1,8 @@
 import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 
 from common.config import SETTINGS
-from data_agent.routers import router, log_requests_middleware
-from data_agent.runners import RootAgentRunner, SystemAgentRunner
-from data_agent.services import SessionLockService
-from data_agent.storage import ObjectStorage, OSArtifactService, PostgresDBClient
-from data_agent.utils import initialize_logger, shutdown_logs_executor
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    object_storage = ObjectStorage()
-    await object_storage.connect()
-
-    # One engine (connection pool) per process — created here and only here.
-    db_client = PostgresDBClient()
-    lock_service = SessionLockService(db_client=db_client)
-    await lock_service.initialize()
-
-    app.state.object_storage = object_storage
-    app.state.agent_runner = RootAgentRunner(
-        artifact_service=OSArtifactService(storage=object_storage),
-        system_runner=SystemAgentRunner(),
-        lock_service=lock_service
-    )
-    try:
-        yield
-    finally:
-        await db_client.close()
-        await object_storage.close()
-        shutdown_logs_executor()
-
-
-app = FastAPI(title="DICE Data Agent Backend", lifespan=lifespan)
-app.include_router(router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.middleware("http")(log_requests_middleware)
+from data_agent.app import app
+from data_agent.utils import initialize_logger
 
 if __name__ == "__main__":
     logger = initialize_logger("cosmo_data_agent.log")

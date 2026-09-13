@@ -7,8 +7,18 @@ from pydantic_settings import BaseSettings
 
 from common.constants import ROOT_DIR
 
+def _to_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Expected a boolean, got {value!r}")
+
+
 _ENV_MAP = {
     "SERVER_PORT": ("server_port", int),
+    "RESET_SESSION_LOCKS": ("reset_session_locks", _to_bool),
     "MONGODB_MCP_HOST": ("mongodb_mcp.host", str),
     "MONGODB_MCP_PORT": ("mongodb_mcp.port", int),
     "MILVUS_MCP_HOST": ("milvus_mcp.host", str),
@@ -105,6 +115,10 @@ class ModelOpenAPI(BaseModel):
 
 class Settings(BaseSettings, extra="allow"):
     server_port: int
+    # Reset every session run lock to idle at startup. Safe only when this
+    # is the sole backend process: with several workers or replicas a
+    # restarting instance would wipe locks held by running instances.
+    reset_session_locks: bool = True
 
     mongodb_mcp: MCPConfig
     milvus_mcp: MCPConfig

@@ -3,12 +3,13 @@ from typing import Optional, Union, Any
 from google.adk.artifacts import BaseArtifactService
 from google.genai import types
 
-from data_agent.storage.object_storage import ObjectStorage
+from common.constants import CONTENT_TYPE
+from data_agent.infra.object_storage import ObjectStorage
 
 logger = logging.getLogger(__name__)
 
 
-class OSArtifactService(BaseArtifactService):
+class ObjectStorageArtifactService(BaseArtifactService):
     def __init__(self, storage: ObjectStorage):
         self._storage = storage
 
@@ -19,6 +20,14 @@ class OSArtifactService(BaseArtifactService):
     @staticmethod
     def get_object_key(app_name: str, user_id: str, session_id: str, filename: str, version: int) -> str:
         return f"{app_name}/{user_id}/{session_id}/{filename}/{version}"
+
+    @staticmethod
+    def parse_version(object_key: str) -> int:
+        """Inverse of `get_object_key`: the version is the last path segment."""
+        _, _, version = object_key.rpartition("/")
+        if not version.isdigit():
+            raise ValueError(f"Object key has no version segment: {object_key}")
+        return int(version)
 
     async def save_artifact(
             self,
@@ -78,8 +87,10 @@ class OSArtifactService(BaseArtifactService):
         if data_object is None:
             return None
 
-        data_info = await self._storage.retrieve_object_info(key=data_uri)
-        mime_type = data_info.get("ContentType", "application/octet-stream")
+        # The head call is best effort: a missing or failed head must not turn a
+        # successfully retrieved object into an error.
+        data_info = await self._storage.retrieve_object_info(key=data_uri) or {}
+        mime_type = data_info.get("ContentType") or CONTENT_TYPE
 
         logger.info(f"Loaded artifact {filename} of session {session_id} for user {user_id}")
         return types.Part.from_bytes(data=data_object, mime_type=mime_type)
@@ -145,6 +156,25 @@ class OSArtifactService(BaseArtifactService):
         ]
         await self._storage.delete_objects(keys=data_uris)
         logger.info(f"Deleted artifact {filename} with {len(data_uris)} versions for user {user_id}")
+
+    async def delete_session_artifacts(self, *, app_name: str, user_id: str, session_id: str) -> int:
+        """Delete every object under the session prefix and return how many were removed.
+
+        Raises if the listing or the delete fails, so a caller removing the
+        session can stop before it orphans the objects.
+        """
+        session_prefix = f"{app_name}/{user_id}/{session_id}/"
+        keys = await self._storage.list_paginated_objects(prefix=session_prefix)
+        if keys is None:
+            raise RuntimeError(f"Failed to list artifacts of session {session_id} for user {user_id}")
+        if not keys:
+            return 0
+
+        if not await self._storage.delete_objects(keys=keys):
+            raise RuntimeError(f"Failed to delete artifacts of session {session_id} for user {user_id}")
+
+        logger.info(f"Deleted {len(keys)} artifact objects of session {session_id} for user {user_id}")
+        return len(keys)
 
     async def list_artifact_versions(
             self,

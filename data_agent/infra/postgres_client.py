@@ -9,13 +9,16 @@ from common.config import SETTINGS
 logger = logging.getLogger(__name__)
 
 
-class PostgresDBClient:
-    def __init__(self, db_name: str = SETTINGS.postgresql_db.name):
-        host = SETTINGS.postgresql_db.host
-        port = SETTINGS.postgresql_db.port
-        connection_uri = f"postgresql+asyncpg://postgres@{host}:{port}/{db_name}"
+def postgres_dsn(db_name: str | None = None) -> str:
+    """SQLAlchemy asyncpg DSN for the configured Postgres server. Single source for every engine in the process."""
+    db = SETTINGS.postgresql_db
+    return f"postgresql+asyncpg://{db.user}@{db.host}:{db.port}/{db_name or db.name}"
+
+
+class PostgresClient:
+    def __init__(self, db_name: str | None = None):
         self._engine: AsyncEngine = create_async_engine(
-            connection_uri,
+            postgres_dsn(db_name),
             pool_size=5,
             max_overflow=5,
             pool_pre_ping=True,
@@ -38,4 +41,4 @@ class PostgresDBClient:
 
     async def close(self):
         await self._engine.dispose()
-        logger.info("PostgresDBClient engine disposed")
+        logger.info("PostgresClient engine disposed")

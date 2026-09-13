@@ -2,7 +2,7 @@ import re
 import pytest
 import logging
 
-from data_agent.utils.timing_plugin import TimingLoggerPlugin, MAX_TOOL_ARGS_LENGTH
+from data_agent.agents.plugins.timing import TimingLoggerPlugin, MAX_TOOL_ARGS_LENGTH
 
 ELAPSED_PATTERN = re.compile(r"elapsed=(\d+\.\d+)s")
 

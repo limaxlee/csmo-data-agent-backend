@@ -5,6 +5,9 @@ ROOT_DIR = pathlib.Path(__file__).parent.parent
 
 HEALTH_CHECK_TIMEOUT = 5
 
+# Fallback MIME type whenever storage, a client, or an upload gives none.
+CONTENT_TYPE = "application/octet-stream"
+
 
 class AppNames(StrEnum):
     ROOT = "data_agent"
@@ -37,3 +40,8 @@ class ModelReasoningEffort(StrEnum):
 
 class SessionStateFields(StrEnum):
     TITLE = "session_title"
+
+
+class RunState(StrEnum):
+    IDLE = "idle"
+    RUNNING = "running"

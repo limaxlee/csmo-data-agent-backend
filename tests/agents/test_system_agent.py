@@ -11,9 +11,15 @@ class TestSystemAgent:
 
         adk.lite_llm.assert_called_once()
         kwargs = adk.lite_llm.call_args.kwargs
-        assert kwargs["model"] == "openai//mnt/models"
-        assert kwargs["api_base"] == SETTINGS.model_openapi.endpoint + "/openapi/llm"
-        assert kwargs["extra_headers"]["x-llm-model-id"] == str(SETTINGS.model_openapi.system_model_id)
+        assert kwargs["model"] == SETTINGS.system_model_openapi.model
+        assert kwargs["api_base"] == SETTINGS.system_model_openapi.endpoint
+        assert kwargs["api_key"] == "not-used"
+        assert kwargs["extra_headers"] == {
+            "x-openapi-token": SETTINGS.system_model_openapi.pass_key,
+            "x-generative-ai-client": SETTINGS.system_model_openapi.client_key,
+            "x-llm-model-id": str(SETTINGS.system_model_openapi.model_id)
+        }
+        assert "extra_body" not in kwargs
         assert module.system_model is adk.lite_llm.return_value
 
     def test_system_agent(self, adk):

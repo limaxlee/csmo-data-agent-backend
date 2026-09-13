@@ -3,20 +3,20 @@ import logging
 from typing import Annotated
 from fastapi import APIRouter, status, HTTPException, Path, Depends, Request, UploadFile, File, Response
 
-from data_agent.runners import RootAgentRunner
+from common.exceptions import SessionBusyError
+from data_agent.services import AgentRunner
 from data_agent.schemas import *
-from data_agent.services.session_lock import SessionBusyError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/apps", tags=["runner"])
 
 
-def get_agent_runner(request: Request) -> RootAgentRunner:
+def get_agent_runner(request: Request) -> AgentRunner:
     return request.app.state.agent_runner
 
 
-AgentRunner = Annotated[RootAgentRunner, Depends(get_agent_runner)]
+AgentRunnerDep = Annotated[AgentRunner, Depends(get_agent_runner)]
 
 
 @router.get(
@@ -26,7 +26,7 @@ AgentRunner = Annotated[RootAgentRunner, Depends(get_agent_runner)]
 )
 async def list_sessions(
         user_id: Annotated[str, Path()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         return await agent_runner.list_sessions(user_id=user_id)
@@ -41,7 +41,7 @@ async def list_sessions(
 )
 async def create_session(
         user_id: Annotated[str, Path()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         return await agent_runner.create_session(user_id=user_id)
@@ -57,10 +57,12 @@ async def create_session(
 async def create_session_title(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         return await agent_runner.create_session_title(user_id, session_id)
+    except SessionBusyError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -75,10 +77,12 @@ async def rename_session_title(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
         request: Annotated[RenameSessionRequest, Depends()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         await agent_runner.rename_session_title(user_id, session_id, request)
+    except SessionBusyError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -94,7 +98,7 @@ async def load_session_artifact(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
         request: Annotated[LoadSessionArtifactRequest, Depends()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         artifact = await agent_runner.load_session_artifact(
@@ -117,7 +121,7 @@ async def load_session_artifact(
 async def get_session_run_state(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         run_state = await agent_runner.get_session_run_state(user_id=user_id, session_id=session_id)
@@ -134,7 +138,7 @@ async def get_session_run_state(
 async def get_session(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         return await agent_runner.get_session(user_id=user_id, session_id=session_id)
@@ -151,7 +155,7 @@ async def get_session(
 async def delete_session(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
-        agent_runner: AgentRunner
+        agent_runner: AgentRunnerDep
 ):
     try:
         await agent_runner.delete_session(user_id=user_id, session_id=session_id)
@@ -168,7 +172,7 @@ async def run(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
         request: Annotated[RunAgentRequest, Depends()],
-        agent_runner: AgentRunner,
+        agent_runner: AgentRunnerDep,
         image_file: UploadFile | None = File(None),
 ):
     t0 = time.monotonic()

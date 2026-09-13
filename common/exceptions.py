@@ -1,0 +1,2 @@
+class SessionBusyError(Exception):
+    pass

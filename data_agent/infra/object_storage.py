@@ -24,6 +24,10 @@ class ObjectStorage:
         self._bucket = self._config["bucket"]
 
     @property
+    def bucket(self) -> str:
+        return self._bucket
+
+    @property
     def client(self):
         if self._client is None:
             raise RuntimeError("Object storage is not connected: connect() must run at application startup")
@@ -64,18 +68,20 @@ class ObjectStorage:
     async def list_paginated_objects(
             self,
             prefix: str = "",
-            max_items: int = 100,
+            max_items: int | None = None,
             bucket: str = None
     ) -> list[str] | None:
+        """List object keys under `prefix`. `max_items=None` returns every key, however many pages that takes."""
         bucket = bucket if bucket else self._bucket
         try:
             objects = []
             paginator = self.client.get_paginator("list_objects_v2")
+            pagination_config = {"MaxItems": max_items} if max_items is not None else {}
 
             async for page in paginator.paginate(
                     Bucket=bucket,
                     Prefix=prefix,
-                    PaginationConfig={"MaxItems": max_items}
+                    PaginationConfig=pagination_config
             ):
                 if page["KeyCount"] == 0:
                     continue

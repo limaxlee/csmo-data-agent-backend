@@ -1,6 +1,6 @@
 from common.config import SETTINGS
 from common.constants import AgentNames, ModelReasoningEffort
-from data_agent.agents.instructions import ROOT_AGENT_DESCRIPTION, ROOT_AGENT_INSTRUCTION
+from data_agent.agents.instructions import ROOT_AGENT_DESCRIPTION, ROOT_AGENT_STANDALONE_INSTRUCTION
 
 MODULE = "data_agent.agents.root_agent"
 
@@ -20,7 +20,7 @@ class TestRootAgent:
         assert callable(instruction)
         rendered = instruction(None)
         assert rendered.startswith("CURRENT LOCAL TIME:")
-        assert rendered.endswith(ROOT_AGENT_INSTRUCTION)
+        assert rendered.endswith(ROOT_AGENT_STANDALONE_INSTRUCTION)
         assert module.root_agent is adk.agent.return_value
 
     def test_root_agent_tools(self, adk):

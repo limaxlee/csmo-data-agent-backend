@@ -1,5 +1,9 @@
+import re
+import json
+import time
 import uuid
 import logging
+from typing import Any
 from fastapi import UploadFile
 from google.adk.agents import BaseAgent
 from google.adk.events import Event, EventActions
@@ -16,6 +20,10 @@ from data_agent.services.title_generator import TitleGenerator
 from data_agent.utils import convert_unix_to_datetime
 
 logger = logging.getLogger(__name__)
+
+# Tools shorten URLs to ids of this shape and return the real targets in a `link_map`.
+_LINK_ID_PATTERN = re.compile(r"link-[0-9a-f]{10}")
+_NO_RESPONSE = "No response received."
 
 
 class AgentRunner:
@@ -51,6 +59,28 @@ class AgentRunner:
                     return part.text
 
         return None
+
+    @classmethod
+    def _collect_link_map(cls, obj: Any, link_map: dict[str, str]):
+        """Gather every `link_map` dict found anywhere inside a tool response.
+
+        The map may sit at any nesting depth and may itself be JSON-encoded
+        inside a string, so recurse through dicts, lists and parseable strings.
+        """
+        if isinstance(obj, dict):
+            found = obj.get("link_map")
+            if isinstance(found, dict):
+                link_map.update(found)
+            for value in obj.values():
+                cls._collect_link_map(value, link_map)
+        elif isinstance(obj, list):
+            for value in obj:
+                cls._collect_link_map(value, link_map)
+        elif isinstance(obj, str) and '"link_map"' in obj:
+            try:
+                cls._collect_link_map(json.loads(obj), link_map)
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     async def _ensure_not_running(self, user_id: str, session_id: str):
         """Reject session writes while a run is in progress.
@@ -314,7 +344,7 @@ class AgentRunner:
 
         try:
             content = await self._build_user_content(user_id, session_id, request.query, image_file)
-            text, timestamp = await self._collect_final_response(user_id, session_id, content)
+            text, timestamp = await self._collect_response(user_id, session_id, content)
 
             logger.info(f"Run agent for session {session_id} of user {user_id} with {text}")
             return RunAgentResponse(response=text, timestamp=convert_unix_to_datetime(timestamp))
@@ -354,25 +384,49 @@ class AgentRunner:
         parts.append(types.Part(text=query))
         return types.Content(role=EventAuthors.USER, parts=parts)
 
-    async def _collect_final_response(self, user_id: str, session_id: str, content: types.Content) -> tuple[str, float]:
-        """Stream the run until its first final event and return (text, timestamp)."""
+    async def _collect_response(self, user_id: str, session_id: str, content: types.Content) -> tuple[str, float]:
+        """Drain the run and return (text, timestamp) of its first final event.
+
+        The stream is consumed to the end on purpose: the run must finish, and
+        tool responses after the first final event may still carry `link_map`
+        entries needed to rewrite link ids in the response text.
+        """
         events = self._runner.run_async(user_id=user_id, session_id=session_id, new_message=content)
+
+        response = _NO_RESPONSE
+        timestamp = None
+        final_seen = False
+        link_map: dict[str, str] = {}
+
         try:
             async for event in events:
-                if not event.is_final_response():
-                    continue
-
                 if event.content and event.content.parts:
-                    return event.content.parts[-1].text, event.timestamp
-                if event.actions and event.actions.escalate:
-                    return f"Agent escalated: {event.error_message or 'No specific message.'}", event.timestamp
-                return "", event.timestamp
+                    for part in event.content.parts:
+                        if part.function_response and part.function_response.response:
+                            self._collect_link_map(part.function_response.response, link_map)
+
+                if not final_seen and event.is_final_response():
+                    final_seen = True
+                    timestamp = event.timestamp
+                    if event.content and event.content.parts:
+                        response = event.content.parts[-1].text
+                    elif event.actions and event.actions.escalate:
+                        response = f"Agent escalated: {event.error_message or 'No specific message.'}"
         finally:
-            # Returning early or timing out leaves the generator suspended. Close it
-            # now so ADK releases its model stream and MCP sessions deterministically.
+            # A cancelled or failed loop leaves the generator suspended. Close it
+            # so ADK releases its model stream and MCP sessions deterministically.
             await events.aclose()
 
-        raise RuntimeError(f"Agent produced no final response for session {session_id} of user {user_id}")
+        if response and link_map:
+            response = _LINK_ID_PATTERN.sub(lambda m: link_map.get(m.group(0), m.group(0)), response)
+
+        if timestamp is None:
+            # The run ended without any final event. Stamp the fallback reply with
+            # now so the response stays well-formed instead of failing on None.
+            logger.warning(f"Agent produced no final response for session {session_id} of user {user_id}")
+            timestamp = time.time()
+
+        return response, timestamp
 
     async def _record_run_error(self, user_id: str, session_id: str, error: Exception):
         """Append the failure to the session. Never raises: a failed write must not replace the run's own error."""

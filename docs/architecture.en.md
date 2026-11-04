@@ -501,7 +501,8 @@ Source: [schemas/runner.py](../data_agent/schemas/runner.py), [schemas/health.py
                               │
  6. ADK                       ├─ persist events + state to PostgreSQL
                               │
- 7. AgentRunner               ├─ take the first final event: response text + timestamp
+ 7. AgentRunner               ├─ drain every event; keep the first final one: response text + timestamp
+                              │     ├─ collect link_map from tool responses, rewrite link-ids in the text
                               │     └─ on failure: append a system event (error_code=LLM_ERROR), re-raise
                               │
  8. finally                   ├─ if new_session: _create_session_title()

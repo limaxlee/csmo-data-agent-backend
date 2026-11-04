@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+from datetime import datetime
 
 from common.constants import AppNames, ArtifactPrefix, EventAuthors, SessionStateFields, RunState, CONTENT_TYPE
 from common.exceptions import SessionBusyError
@@ -521,7 +522,7 @@ class TestAgentRunner:
                 request=RunAgentRequest(query="Hello")
             )
         )
-        assert result.response == ""
+        assert result.response == "No response received."
         assert result.timestamp.timestamp() == 1700000000.0
 
         async def _no_final_events():
@@ -531,13 +532,65 @@ class TestAgentRunner:
 
         agent_runner._runner.run_async = mocker.MagicMock(side_effect=lambda **kwargs: _no_final_events())
 
-        with pytest.raises(RuntimeError, match="no final response"):
-            asyncio.run(
-                agent_runner.run(user_id="user-1", session_id="session-1", request=RunAgentRequest(query="Hello"))
-            )
+        before = datetime.now().astimezone()
+        result = asyncio.run(
+            agent_runner.run(user_id="user-1", session_id="session-1", request=RunAgentRequest(query="Hello"))
+        )
+        assert result.response == "No response received."
+        assert result.timestamp >= before
         agent_runner._lock_repository.release.assert_awaited()
 
-    def test_run_closes_event_stream_after_final_response(self, mocker, agent_runner):
+    def test_collect_link_map(self):
+        link_map = {}
+
+        AgentRunner._collect_link_map({"link_map": {"link-0000000001": "https://a"}}, link_map)
+        AgentRunner._collect_link_map({"result": {"nested": {"link_map": {"link-0000000002": "https://b"}}}}, link_map)
+        AgentRunner._collect_link_map([{"link_map": {"link-0000000003": "https://c"}}], link_map)
+        AgentRunner._collect_link_map({"text": '{"link_map": {"link-0000000004": "https://d"}}'}, link_map)
+        AgentRunner._collect_link_map('[{"payload": "{\\"link_map\\": {\\"link-0000000005\\": \\"https://e\\"}}"}]', link_map)
+
+        assert link_map == {
+            "link-0000000001": "https://a",
+            "link-0000000002": "https://b",
+            "link-0000000003": "https://c",
+            "link-0000000004": "https://d",
+            "link-0000000005": "https://e",
+        }
+
+        AgentRunner._collect_link_map({"link_map": "not-a-dict"}, link_map)
+        AgentRunner._collect_link_map('{"link_map": broken json', link_map)
+        AgentRunner._collect_link_map("plain text without a map", link_map)
+        AgentRunner._collect_link_map(42, link_map)
+        assert len(link_map) == 5
+
+    def test_run_rewrites_link_ids_from_tool_responses(self, mocker, agent_runner):
+        def _tool_event(response):
+            event = mocker.MagicMock()
+            event.is_final_response.return_value = False
+            part = mocker.MagicMock(text=None)
+            part.function_response.response = response
+            event.content.parts = [part]
+            return event
+
+        final = _final_event(mocker, "See link-aaaaaaaaaa, link-bbbbbbbbbb and link-cccccccccc.")
+        final.content.parts[0].function_response = None
+
+        async def _events():
+            yield _tool_event({"link_map": {"link-aaaaaaaaaa": "https://example.com/a"}})
+            yield final
+            # Tool output after the first final event must still feed the link map.
+            yield _tool_event({"result": '{"link_map": {"link-bbbbbbbbbb": "https://example.com/b"}}'})
+
+        agent_runner._runner.run_async = mocker.MagicMock(side_effect=lambda **kwargs: _events())
+
+        result = asyncio.run(
+            agent_runner.run(user_id="user-1", session_id="session-1", request=RunAgentRequest(query="Hello"))
+        )
+
+        assert result.response == "See https://example.com/a, https://example.com/b and link-cccccccccc."
+        assert result.timestamp.timestamp() == 1700000000.0
+
+    def test_run_keeps_first_final_response_and_closes_stream(self, mocker, agent_runner):
         closed = []
 
         async def _events():

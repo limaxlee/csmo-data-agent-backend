@@ -501,7 +501,8 @@ Agent 기능의 base path: `/apps`
                               │
  6. ADK                       ├─ 이벤트 + state를 PostgreSQL에 저장
                               │
- 7. AgentRunner               ├─ 첫 번째 final 이벤트에서 응답 텍스트와 timestamp 추출
+ 7. AgentRunner               ├─ 모든 이벤트를 소비하고 첫 번째 final 이벤트에서 응답 텍스트와 timestamp 추출
+                              │     ├─ tool 응답의 link_map을 수집해 텍스트의 link-id를 실제 URL로 치환
                               │     └─ 실패 시: system 이벤트(error_code=LLM_ERROR) 추가 후 예외 재전파
                               │
  8. finally                   ├─ new_session이면 _create_session_title() 수행

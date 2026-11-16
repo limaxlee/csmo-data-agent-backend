@@ -23,16 +23,6 @@ class ObjectStorage:
         }
         self._bucket = self._config["bucket"]
 
-    @property
-    def bucket(self) -> str:
-        return self._bucket
-
-    @property
-    def client(self):
-        if self._client is None:
-            raise RuntimeError("Object storage is not connected: connect() must run at application startup")
-        return self._client
-
     async def connect(self) -> "ObjectStorage":
         if self._client:
             return self
@@ -55,15 +45,43 @@ class ObjectStorage:
             logger.exception(f"Unexpected error occurred during object storage connection: {str(e)}")
             raise
 
-    async def close(self) -> None:
-        if not self._client:
-            return
-
+    async def upload_object(
+            self,
+            file_object: str | bytes,
+            key: str, bucket: str = None,
+            content_type: str | None = None
+    ) -> bool:
+        bucket = bucket if bucket else self._bucket
         try:
-            await self._exit_stack.aclose()
-            logger.info("Closed object storage client")
-        finally:
-            self._client = None
+            if isinstance(file_object, str):
+                async with aiofiles.open(file_object, "rb") as f:
+                    data = await f.read()
+            elif isinstance(file_object, bytes):
+                data = file_object
+            else:
+                raise ValueError("Unsupported file type")
+
+            extra_info = {"ContentType": content_type} if content_type else {}
+            await self._client.put_object(Bucket=bucket, Body=data, Key=key, **extra_info)
+
+            logger.info(f"Object uploaded to bucket {bucket} as {key}")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to upload object {key} to bucket {bucket}: {e}")
+            return False
+
+    async def retrieve_object(self, key: str, bucket: str = None) -> bytes | None:
+        bucket = bucket if bucket else self._bucket
+        try:
+            response = await self._client.get_object(Bucket=bucket, Key=key)
+            async with response["Body"] as stream:
+                data = await stream.read()
+
+            logger.info(f"Object {key} retrieved from bucket {bucket}")
+            return data
+        except Exception as e:
+            logger.exception(f"Failed to retrieve object {key} from bucket {bucket}: {e}")
+            return None
 
     async def list_paginated_objects(
             self,
@@ -71,11 +89,10 @@ class ObjectStorage:
             max_items: int | None = None,
             bucket: str = None
     ) -> list[str] | None:
-        """List object keys under `prefix`. `max_items=None` returns every key, however many pages that takes."""
         bucket = bucket if bucket else self._bucket
         try:
             objects = []
-            paginator = self.client.get_paginator("list_objects_v2")
+            paginator = self._client.get_paginator("list_objects_v2")
             pagination_config = {"MaxItems": max_items} if max_items is not None else {}
 
             async for page in paginator.paginate(
@@ -95,48 +112,10 @@ class ObjectStorage:
             logger.exception(f"Failed to list objects in bucket {bucket}: {e}")
             return None
 
-    async def upload_object(
-            self,
-            file_object: str | bytes,
-            key: str, bucket: str = None,
-            content_type: str | None = None
-    ) -> bool:
-        bucket = bucket if bucket else self._bucket
-        try:
-            if isinstance(file_object, str):
-                async with aiofiles.open(file_object, "rb") as f:
-                    data = await f.read()
-            elif isinstance(file_object, bytes):
-                data = file_object
-            else:
-                raise ValueError("Unsupported file type")
-
-            extra_info = {"ContentType": content_type} if content_type else {}
-            await self.client.put_object(Bucket=bucket, Body=data, Key=key, **extra_info)
-
-            logger.info(f"Object uploaded to bucket {bucket} as {key}")
-            return True
-        except Exception as e:
-            logger.exception(f"Failed to upload object {key} to bucket {bucket}: {e}")
-            return False
-
-    async def retrieve_object(self, key: str, bucket: str = None) -> bytes | None:
-        bucket = bucket if bucket else self._bucket
-        try:
-            response = await self.client.get_object(Bucket=bucket, Key=key)
-            async with response["Body"] as stream:
-                data = await stream.read()
-
-            logger.info(f"Object {key} retrieved from bucket {bucket}")
-            return data
-        except Exception as e:
-            logger.exception(f"Failed to retrieve object {key} from bucket {bucket}: {e}")
-            return None
-
     async def retrieve_object_info(self, key: str, bucket: str = None) -> dict | None:
         bucket = bucket if bucket else self._bucket
         try:
-            object_acl = await self.client.head_object(Bucket=bucket, Key=key)
+            object_acl = await self._client.head_object(Bucket=bucket, Key=key)
 
             logger.info(f"ACL retrieved for object {key} from bucket {bucket}")
             return object_acl
@@ -149,7 +128,7 @@ class ObjectStorage:
         try:
             for i in range(0, len(keys), 1000):
                 key_bulk = keys[i:i + 1000]
-                response = await self.client.delete_objects(
+                response = await self._client.delete_objects(
                     Bucket=bucket,
                     Delete={"Objects": [{"Key": key} for key in key_bulk]}
                 )
@@ -160,4 +139,24 @@ class ObjectStorage:
         except Exception as e:
             logger.exception(f"Failed to delete objects {keys} from bucket {bucket}: {e}")
             return False
-        
+
+    async def head_bucket(self, bucket: str = None) -> bool:
+        bucket = bucket if bucket else self._bucket
+
+        try:
+            await self._client.head_bucket(Bucket=bucket)
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to access bucket {bucket}: {e}")
+            return False
+
+    async def close(self) -> None:
+        if not self._client:
+            return
+
+        try:
+            await self._exit_stack.aclose()
+            logger.info("Closed object storage client")
+        finally:
+            self._client = None
+            

@@ -2,11 +2,11 @@ from common.config import SETTINGS
 from common.constants import AgentNames, ModelReasoningEffort
 from data_agent.agents.instructions import MONGODB_AGENT_INSTRUCTION
 
-MODULE = "data_agent.agents.mongodb_scanner"
+MODULE = "data_agent.agents.mongodb"
 
 
-class TestMongodbScanner:
-    def test_mongodb_agent(self, adk):
+class TestMongodbAgent:
+    def test_init_mongodb_agent(self, adk):
         module = adk.reload(MODULE)
 
         adk.connection_params.assert_called_once_with(

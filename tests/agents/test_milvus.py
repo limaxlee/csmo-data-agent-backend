@@ -1,12 +1,12 @@
 from common.config import SETTINGS
 from common.constants import AgentNames, ModelReasoningEffort
-from data_agent.agents.instructions.milvus_scanner import MILVUS_AGENT_INSTRUCTION
+from data_agent.agents.instructions.milvus import MILVUS_AGENT_INSTRUCTION
 
-MODULE = "data_agent.agents.milvus_scanner"
+MODULE = "data_agent.agents.milvus"
 
 
-class TestMilvusScanner:
-    def test_milvus_agent(self, adk):
+class TestMilvusAgent:
+    def test_init_milvus_agent(self, adk):
         module = adk.reload(MODULE)
         adk.connection_params.assert_called_once_with(
             url=f"http://{SETTINGS.milvus_mcp.host}:{SETTINGS.milvus_mcp.port}/mcp"

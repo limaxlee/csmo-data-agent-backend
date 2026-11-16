@@ -1,4 +1,4 @@
-SYSTEM_AGENT_INSTRUCTION = """
+TITLE_AGENT_INSTRUCTION = """
 You generate a short title for a conversation.
 
 Rules:

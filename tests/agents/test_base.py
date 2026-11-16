@@ -1,11 +1,11 @@
 from common.config import SETTINGS
 from common.constants import ModelReasoningEffort
-from data_agent.agents.models import build_model
+from data_agent.agents.base import build_model
 
 
 class TestBuildModel:
     def test_build_model(self, mocker):
-        lite_llm = mocker.patch("data_agent.agents.models.LiteLlm")
+        lite_llm = mocker.patch("data_agent.agents.base.LiteLlm")
 
         model = build_model(ModelReasoningEffort.MEDIUM)
 
@@ -13,7 +13,7 @@ class TestBuildModel:
         kwargs = lite_llm.call_args.kwargs
         assert kwargs["model"] == SETTINGS.root_model_openapi.model
         assert kwargs["api_base"] == SETTINGS.root_model_openapi.endpoint
-        assert kwargs["api_key"] == "not-used"
+        assert kwargs["api_key"] == "default"
         assert kwargs["extra_headers"] == {
             "x-openapi-token": SETTINGS.root_model_openapi.pass_key,
             "x-generative-ai-client": SETTINGS.root_model_openapi.client_key,

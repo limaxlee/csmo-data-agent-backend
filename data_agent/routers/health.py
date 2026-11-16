@@ -26,8 +26,8 @@ async def check_health(checker: HealthCheckerDep):
     try:
         health_status = CheckHealthStatusResponse(
             server_status="healthy",
-            postgresql_db_status="healthy" if await checker.check_postgres() else "unhealthy",
-            object_storage_status="healthy" if await checker.check_storage() else "unhealthy"
+            postgresql_db_status="healthy" if await checker.check_postgresql() else "unhealthy",
+            object_storage_status="healthy" if await checker.check_object_storage() else "unhealthy"
         )
 
         logger.info(f"Checked health status: {health_status}")

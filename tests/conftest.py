@@ -12,4 +12,3 @@ def reset_logs_executor():
     ExecutorHolder.instance = None
     yield
     ExecutorHolder.instance = None
-    

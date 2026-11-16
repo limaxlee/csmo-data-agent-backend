@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .logging import log_requests_middleware
+from .logging import log_requests
 
 
 def register_middleware(app: FastAPI) -> None:
@@ -12,4 +12,4 @@ def register_middleware(app: FastAPI) -> None:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.middleware("http")(log_requests_middleware)
+    app.middleware("http")(log_requests)

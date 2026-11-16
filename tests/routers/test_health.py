@@ -10,8 +10,8 @@ class TestHealthRoutes:
     @pytest.fixture
     def health_checker(self, mocker):
         checker = mocker.MagicMock()
-        checker.check_postgres = mocker.AsyncMock(return_value=True)
-        checker.check_storage = mocker.AsyncMock(return_value=True)
+        checker.check_postgresql = mocker.AsyncMock(return_value=True)
+        checker.check_object_storage = mocker.AsyncMock(return_value=True)
         return checker
 
     @pytest.fixture
@@ -37,11 +37,11 @@ class TestHealthRoutes:
             "postgresql_db_status": "healthy",
             "object_storage_status": "healthy"
         }
-        health_checker.check_postgres.assert_awaited_once()
-        health_checker.check_storage.assert_awaited_once()
+        health_checker.check_postgresql.assert_awaited_once()
+        health_checker.check_object_storage.assert_awaited_once()
 
-        health_checker.check_postgres = mocker.AsyncMock(return_value=False)
-        health_checker.check_storage = mocker.AsyncMock(return_value=False)
+        health_checker.check_postgresql = mocker.AsyncMock(return_value=False)
+        health_checker.check_object_storage = mocker.AsyncMock(return_value=False)
 
         response = client.get("/health")
 
@@ -52,7 +52,7 @@ class TestHealthRoutes:
             "object_storage_status": "unhealthy"
         }
 
-        health_checker.check_postgres = mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        health_checker.check_postgresql = mocker.AsyncMock(side_effect=Exception("Runtime error"))
 
         response = client.get("/health")
 

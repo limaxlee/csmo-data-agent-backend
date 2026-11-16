@@ -5,7 +5,7 @@ from fastapi import Request
 logger = logging.getLogger(__name__)
 
 
-async def log_requests_middleware(request: Request, call_next):
+async def log_requests(request: Request, call_next):
     start_time = time.monotonic()
     logger.info(f"Request: {request.method} {request.url.path}?{request.query_params}")
 

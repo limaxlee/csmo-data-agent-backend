@@ -7,7 +7,7 @@ from data_agent.middleware import register_middleware
 
 
 class TestRegisterMiddleware:
-    def _build_client(self):
+    def build_mock_client(self):
         app = FastAPI()
         register_middleware(app)
 
@@ -18,7 +18,7 @@ class TestRegisterMiddleware:
         return TestClient(app)
 
     def test_allows_cross_origin_requests(self):
-        client = self._build_client()
+        client = self.build_mock_client()
 
         response = client.options(
             "/ping",
@@ -36,7 +36,7 @@ class TestRegisterMiddleware:
         assert "access-control-allow-origin" in response.headers
 
     def test_logs_requests(self, caplog):
-        client = self._build_client()
+        client = self.build_mock_client()
 
         with caplog.at_level(logging.INFO, logger="data_agent.middleware"):
             response = client.get("/ping?user=user-1")

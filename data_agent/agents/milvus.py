@@ -4,16 +4,16 @@ from google.adk.tools.mcp_tool.mcp_toolset import MCPToolset
 
 from common.config import SETTINGS
 from common.constants import ModelReasoningEffort, AgentNames
-from data_agent.agents.instructions import MONGODB_AGENT_INSTRUCTION, get_instruction_with_current_time
-from data_agent.agents.models import build_model
+from data_agent.agents.base import build_model
+from data_agent.agents.instructions import MILVUS_AGENT_INSTRUCTION
 
-mongodb_agent = Agent(
+milvus_agent = Agent(
     model=build_model(ModelReasoningEffort.LOW),
-    name=AgentNames.MONGODB,
-    instruction=get_instruction_with_current_time(MONGODB_AGENT_INSTRUCTION),
+    name=AgentNames.MILVUS,
+    instruction=MILVUS_AGENT_INSTRUCTION,
     tools=[
         MCPToolset(connection_params=StreamableHTTPConnectionParams(
-            url=f"http://{SETTINGS.mongodb_mcp.host}:{SETTINGS.mongodb_mcp.port}/mcp")
+            url=f"http://{SETTINGS.milvus_mcp.host}:{SETTINGS.milvus_mcp.port}/mcp")
         )
     ]
 )

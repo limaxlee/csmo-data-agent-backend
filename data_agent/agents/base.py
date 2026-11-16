@@ -8,7 +8,7 @@ def build_model(reasoning_effort: ModelReasoningEffort) -> LiteLlm:
     return LiteLlm(
         model=SETTINGS.root_model_openapi.model,
         api_base=SETTINGS.root_model_openapi.endpoint,
-        api_key="not-used",
+        api_key="default",
         extra_headers={
             "x-openapi-token": SETTINGS.root_model_openapi.pass_key,
             "x-generative-ai-client": SETTINGS.root_model_openapi.client_key,

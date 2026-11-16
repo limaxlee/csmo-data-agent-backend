@@ -1,29 +1,28 @@
 import re
-import json
-import time
 import uuid
+import time
+import json
 import logging
 from typing import Any
 from fastapi import UploadFile
+from google.genai import types
 from google.adk.agents import BaseAgent
 from google.adk.events import Event, EventActions
 from google.adk.runners import Runner
 from google.adk.sessions import BaseSessionService, Session
-from google.genai import types
 
-from common.constants import SessionStateFields, ArtifactPrefix, EventAuthors, AppNames, RunState, CONTENT_TYPE
-from common.exceptions import SessionBusyError
-from data_agent.schemas import *
-from data_agent.agents.plugins import TimingLoggerPlugin
+from common.constants import (
+    AppNames, RunState, EventAuthors,
+    SessionStateFields, ArtifactPrefix, DEFAULT_AGENT_RESPONSE
+)
 from data_agent.infra import ObjectStorageArtifactService, SessionLockRepository
+from data_agent.schemas import *
 from data_agent.services.title_generator import TitleGenerator
 from data_agent.utils import convert_unix_to_datetime
 
 logger = logging.getLogger(__name__)
 
-# Tools shorten URLs to ids of this shape and return the real targets in a `link_map`.
 _LINK_ID_PATTERN = re.compile(r"link-[0-9a-f]{10}")
-_NO_RESPONSE = "No response received."
 
 
 class AgentRunner:
@@ -33,23 +32,22 @@ class AgentRunner:
             session_service: BaseSessionService,
             artifact_service: ObjectStorageArtifactService,
             title_generator: TitleGenerator,
-            lock_repository: SessionLockRepository
+            session_lock: SessionLockRepository
     ):
         self._app_name = AppNames.ROOT
         self._session_service = session_service
         self._artifact_service = artifact_service
         self._title_generator = title_generator
-        self._lock_repository = lock_repository
+        self._session_lock = session_lock
         self._runner = Runner(
             agent=agent,
             app_name=AppNames.ROOT,
             session_service=self._session_service,
-            artifact_service=artifact_service,
-            plugins=[TimingLoggerPlugin()]
+            artifact_service=artifact_service
         )
 
     @staticmethod
-    def _find_last_user_message(session: Session) -> str | None:
+    def _find_last_user_prompt(session: Session) -> str | None:
         for event in reversed(session.events):
             if event.author != EventAuthors.USER or not event.content or not event.content.parts:
                 continue
@@ -60,74 +58,18 @@ class AgentRunner:
 
         return None
 
-    @classmethod
-    def _collect_link_map(cls, obj: Any, link_map: dict[str, str]):
-        """Gather every `link_map` dict found anywhere inside a tool response.
-
-        The map may sit at any nesting depth and may itself be JSON-encoded
-        inside a string, so recurse through dicts, lists and parseable strings.
-        """
-        if isinstance(obj, dict):
-            found = obj.get("link_map")
-            if isinstance(found, dict):
-                link_map.update(found)
-            for value in obj.values():
-                cls._collect_link_map(value, link_map)
-        elif isinstance(obj, list):
-            for value in obj:
-                cls._collect_link_map(value, link_map)
-        elif isinstance(obj, str) and '"link_map"' in obj:
-            try:
-                cls._collect_link_map(json.loads(obj), link_map)
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-    async def _ensure_not_running(self, user_id: str, session_id: str):
-        """Reject session writes while a run is in progress.
-
-        ADK rejects an append from a stale session object, so a title write
-        landing between two run events would either fail itself or make the
-        run's next append fail. Refusing up front keeps the run safe.
-        """
-        run_state = await self._lock_repository.get_run_state(
-            app_name=self._app_name,
-            user_id=user_id,
-            session_id=session_id
-        )
-        if run_state == RunState.RUNNING:
-            raise SessionBusyError(f"Session {session_id} has a run in progress")
-
-    async def _set_title(self, session: Session, session_title: str):
-        await self._session_service.append_event(session, Event(
-            author=EventAuthors.SYSTEM,
-            actions=EventActions(state_delta={SessionStateFields.TITLE: session_title})
-        ))
-
-    async def _upload_artifact(self, user_id: str, session_id: str, image_file: UploadFile) -> str:
-        filename = image_file.filename
+    async def create_session(self, user_id: str) -> CreateSessionResponse:
         try:
-            image_bytes = await image_file.read()
-            content_type = image_file.content_type or CONTENT_TYPE
-
-            version = await self._artifact_service.save_artifact(
+            session = await self._session_service.create_session(
                 app_name=self._app_name,
                 user_id=user_id,
-                session_id=session_id,
-                filename=filename,
-                artifact=types.Part.from_bytes(data=image_bytes, mime_type=content_type)
-            )
-            data_uri = self._artifact_service.get_object_key(
-                app_name=self._app_name,
-                user_id=user_id,
-                session_id=session_id,
-                filename=filename,
-                version=version
+                session_id=uuid.uuid4().hex
             )
 
-            logger.info(f"Uploaded artifact {filename} with key {data_uri} for user {user_id} and session {session_id}")
-            return data_uri
+            logger.info(f"Created session for user {user_id} with id: {session.id}")
+            return CreateSessionResponse(session_id=session.id)
         except Exception as e:
-            logger.exception(f"Failed to upload artifact {filename} session {session_id} of user {user_id}: {str(e)}")
+            logger.exception(f"Failed to create new session for user {user_id}: {str(e)}")
             raise
 
     async def list_sessions(self, user_id: str) -> ListSessionsResponse:
@@ -135,7 +77,7 @@ class AgentRunner:
             result = await self._session_service.list_sessions(app_name=self._app_name, user_id=user_id)
 
             session_ids = [session.id for session in result.sessions]
-            run_states = await self._lock_repository.get_run_states(
+            run_states = await self._session_lock.get_run_states(
                 app_name=self._app_name,
                 user_id=user_id,
                 session_ids=session_ids
@@ -161,83 +103,32 @@ class AgentRunner:
             logger.exception(f"Failed to list sessions of user {user_id}: {str(e)}")
             raise
 
-    async def create_session(self, user_id: str) -> CreateSessionResponse:
+    async def delete_session(self, user_id: str, session_id: str):
         try:
-            session = await self._session_service.create_session(
-                app_name=self._app_name,
-                user_id=user_id,
-                session_id=uuid.uuid4().hex
-            )
-
-            logger.info(f"Created session for user {user_id} with id: {session.id}")
-            return CreateSessionResponse(session_id=session.id)
-        except Exception as e:
-            logger.exception(f"Failed to create new session for user {user_id}: {str(e)}")
-            raise
-
-    async def create_session_title(
-            self,
-            user_id: str,
-            session_id: str,
-            user_message: str | None = None
-    ) -> CreateSessionTitleResponse:
-        """Router-facing entry point: refuses while a run holds the session."""
-        await self._ensure_not_running(user_id=user_id, session_id=session_id)
-        return await self._create_session_title(user_id=user_id, session_id=session_id, user_message=user_message)
-
-    async def _create_session_title(
-            self,
-            user_id: str,
-            session_id: str,
-            user_message: str | None = None
-    ) -> CreateSessionTitleResponse:
-        """Does the work without the busy check, so run() can call it while holding the lock."""
-        try:
-            session = await self._session_service.get_session(
+            await self._session_service.delete_session(
                 app_name=self._app_name,
                 user_id=user_id,
                 session_id=session_id
             )
-            if not session:
-                raise ValueError(f"User {user_id} does not have session {session_id}")
 
-            user_message = user_message or self._find_last_user_message(session)
-            if not user_message:
-                raise ValueError(f"Cannot create session title: session {session_id} has no user message")
-
-            session_title = await self._title_generator.generate(
-                user_id=user_id,
-                session_id=session_id,
-                user_message=user_message
-            )
-
-            await self._set_title(session, session_title)
-
-            logger.info(f"Created a title {session_title} for session {session_id} of user {user_id}")
-            return CreateSessionTitleResponse(session_title=session_title)
-        except Exception as e:
-            logger.exception(f"Failed to create a title for session {session_id} of user {user_id}: {str(e)}")
-            raise
-
-    async def rename_session_title(self, user_id: str, session_id: str, request: RenameSessionRequest):
-        await self._ensure_not_running(user_id=user_id, session_id=session_id)
-        try:
-            session = await self._session_service.get_session(
+            deleted = await self._artifact_service.delete_session_artifacts(
                 app_name=self._app_name,
                 user_id=user_id,
                 session_id=session_id
             )
-            if not session:
-                raise ValueError(f"User {user_id} does not have session {session_id}")
 
-            await self._set_title(session, request.session_title)
+            await self._session_lock.delete(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
 
-            logger.info(f"Renamed session {session_id} of user {user_id} to {request.session_title}")
+            logger.info(f"Deleted {session_id} session of user {user_id} with {deleted} artifact objects")
         except Exception as e:
-            logger.exception(f"Failed to rename the session {session_id} to {request.session_title}: {str(e)}")
+            logger.exception(f"Failed to delete session {session_id} of user {user_id}: {str(e)}")
             raise
 
-    async def get_session(self, user_id: str, session_id: str) -> SessionInfo:
+    async def get_session(self, user_id: str, session_id: str) -> GetSessionResponse:
         try:
             session = await self._session_service.get_session(
                 app_name=self._app_name,
@@ -250,14 +141,14 @@ class AgentRunner:
             for event in session.events:
                 event.timestamp = convert_unix_to_datetime(event.timestamp)
 
-            run_state = await self._lock_repository.get_run_state(
+            run_state = await self._session_lock.get_run_state(
                 app_name=self._app_name,
                 user_id=user_id,
                 session_id=session_id
             )
 
             logger.info(f"Retrieved {session_id} session info of user {user_id}")
-            return SessionInfo(
+            return GetSessionResponse(
                 session_id=session.id,
                 app_name=session.app_name,
                 user_id=session.user_id,
@@ -268,39 +159,6 @@ class AgentRunner:
             )
         except Exception as e:
             logger.exception(f"Failed to get session {session_id} of user {user_id}: {str(e)}")
-            raise
-
-    async def get_session_run_state(self, user_id: str, session_id: str) -> RunState:
-        """Lightweight state check for the frontend — no events loaded."""
-        return await self._lock_repository.get_run_state(
-            app_name=self._app_name,
-            user_id=user_id,
-            session_id=session_id
-        )
-
-    async def delete_session(self, user_id: str, session_id: str):
-        try:
-            # Artifacts first: if this fails the session survives and the
-            # client can retry. The other order would orphan the objects.
-            deleted = await self._artifact_service.delete_session_artifacts(
-                app_name=self._app_name,
-                user_id=user_id,
-                session_id=session_id
-            )
-            await self._session_service.delete_session(
-                app_name=self._app_name,
-                user_id=user_id,
-                session_id=session_id
-            )
-            await self._lock_repository.delete(
-                app_name=self._app_name,
-                user_id=user_id,
-                session_id=session_id
-            )
-
-            logger.info(f"Deleted {session_id} session of user {user_id} with {deleted} artifact objects")
-        except Exception as e:
-            logger.exception(f"Failed to delete session {session_id} of user {user_id}: {str(e)}")
             raise
 
     async def load_session_artifact(
@@ -329,40 +187,105 @@ class AgentRunner:
             logger.exception(f"Failed to load artifact {data_uri} for session {session_id} of user {user_id}: {str(e)}")
             raise
 
-    async def run(
+    async def get_session_run_state(self, user_id: str, session_id: str) -> GetRunStateResponse:
+        run_state = await self._session_lock.get_run_state(
+            app_name=self._app_name,
+            user_id=user_id,
+            session_id=session_id
+        )
+
+        return GetRunStateResponse(session_id=session_id, run_state=run_state)
+
+    async def rename_session_title(self, user_id: str, session_id: str, request: RenameSessionRequest):
+        try:
+            state = await self.get_session_run_state(user_id=user_id, session_id=session_id)
+            if state.run_state == RunState.RUNNING:
+                raise ValueError(f"Session {session_id} of user {user_id} has a run in progress")
+
+            session = await self._session_service.get_session(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+            if not session:
+                raise ValueError(f"User {user_id} does not have session {session_id}")
+
+            await self._session_service.append_event(session, Event(
+                author=EventAuthors.SYSTEM,
+                actions=EventActions(state_delta={SessionStateFields.TITLE: request.session_title})
+            ))
+            logger.info(f"Renamed session {session_id} of user {user_id} to {request.session_title}")
+        except Exception as e:
+            logger.exception(f"Failed to rename the session {session_id} to {request.session_title}: {str(e)}")
+            raise
+
+    async def create_session_title(
             self,
             user_id: str,
             session_id: str,
-            request: RunAgentRequest,
-            image_file: UploadFile | None = None
-    ) -> RunAgentResponse:
-        # Fail fast with SessionBusyError if a run is already in progress for
-        # this session. Raised BEFORE the try/finally below, so a rejected
-        # request does not release someone else's lock or trigger title creation.
-        if not await self._lock_repository.try_acquire(self._app_name, user_id, session_id):
-            raise SessionBusyError(f"Session {session_id} already has a run in progress")
-
+            user_prompt: str | None = None
+    ) -> CreateSessionTitleResponse:
         try:
-            content = await self._build_user_content(user_id, session_id, request.query, image_file)
-            text, timestamp = await self._collect_response(user_id, session_id, content)
+            state = await self.get_session_run_state(user_id=user_id, session_id=session_id)
+            if state.run_state == RunState.RUNNING:
+                raise ValueError(f"Session {session_id} of user {user_id} has a run in progress")
 
-            logger.info(f"Run agent for session {session_id} of user {user_id} with {text}")
-            return RunAgentResponse(response=text, timestamp=convert_unix_to_datetime(timestamp))
+            return await self._create_session_title(user_id=user_id, session_id=session_id, user_message=user_prompt)
         except Exception as e:
-            logger.exception(f"Failed to run agent for session {session_id} of user {user_id}: {str(e)}")
-            await self._record_run_error(user_id, session_id, e)
+            logger.exception(f"Failed to create title for session {session_id} of user {user_id}: {e}")
             raise
-        finally:
-            # Title creation appends an event to the session, so it must happen
-            # while the lock is still held. Otherwise a second run could start
-            # in between and make this session object stale.
-            if request.new_session:
-                try:
-                    await self._create_session_title(user_id=user_id, session_id=session_id, user_message=request.query)
-                except Exception:
-                    # Already logged inside; a missing title must not change the run's outcome.
-                    logger.warning(f"Run for session {session_id} of user {user_id} continues without a title")
-            await self._lock_repository.release(self._app_name, user_id, session_id)
+
+    async def _create_session_title(
+            self,
+            user_id: str,
+            session_id: str,
+            user_message: str | None = None
+    ) -> CreateSessionTitleResponse:
+        try:
+            session = await self._session_service.get_session(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id
+            )
+            if not session:
+                raise ValueError(f"User {user_id} does not have session {session_id}")
+
+            user_message = user_message or self._find_last_user_prompt(session)
+            if not user_message:
+                raise ValueError(f"Cannot create session title: session {session_id} has no user message")
+
+            session_title = await self._title_generator.generate(
+                user_id=user_id,
+                session_id=session_id,
+                user_message=user_message
+            )
+
+            await self._session_service.append_event(session, Event(
+                author=EventAuthors.SYSTEM,
+                actions=EventActions(state_delta={SessionStateFields.TITLE: session_title})
+            ))
+            logger.info(f"Created title {session_title} for session {session_id} of user {user_id}")
+            return CreateSessionTitleResponse(session_title=session_title)
+        except Exception as e:
+            logger.exception(f"Failed to create title for session {session_id} of user {user_id}: {e}")
+            raise
+
+    @classmethod
+    def _get_link_map(cls, item: Any, link_map: dict[str, str]):
+        if isinstance(item, dict):
+            found_link_map = item.get("link_map")
+            if isinstance(found_link_map, dict):
+                link_map.update(found_link_map)
+            for value in item.values():
+                cls._get_link_map(value, link_map)
+        elif isinstance(item, list):
+            for value in item:
+                cls._get_link_map(value, link_map)
+        elif isinstance(item, str) and '"link_map"' in item:
+            try:
+                cls._get_link_map(json.loads(item), link_map)
+            except ValueError:
+                pass
 
     async def _build_user_content(
             self,
@@ -384,26 +307,46 @@ class AgentRunner:
         parts.append(types.Part(text=query))
         return types.Content(role=EventAuthors.USER, parts=parts)
 
-    async def _collect_response(self, user_id: str, session_id: str, content: types.Content) -> tuple[str, float]:
-        """Drain the run and return (text, timestamp) of its first final event.
+    async def _upload_artifact(self, user_id: str, session_id: str, image_file: UploadFile) -> str:
+        filename = image_file.filename
+        try:
+            image_bytes = await image_file.read()
+            content_type = image_file.content_type
 
-        The stream is consumed to the end on purpose: the run must finish, and
-        tool responses after the first final event may still carry `link_map`
-        entries needed to rewrite link ids in the response text.
-        """
+            version = await self._artifact_service.save_artifact(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id,
+                filename=filename,
+                artifact=types.Part.from_bytes(data=image_bytes, mime_type=content_type)
+            )
+            data_uri = self._artifact_service.get_object_key(
+                app_name=self._app_name,
+                user_id=user_id,
+                session_id=session_id,
+                filename=filename,
+                version=version
+            )
+
+            logger.info(f"Uploaded artifact {filename} with key {data_uri} for user {user_id} and session {session_id}")
+            return data_uri
+        except Exception as e:
+            logger.exception(f"Failed to upload artifact {filename} session {session_id} of user {user_id}: {str(e)}")
+            raise
+
+    async def _get_agent_response(self, user_id: str, session_id: str, content: types.Content) -> tuple[str, float]:
         events = self._runner.run_async(user_id=user_id, session_id=session_id, new_message=content)
-
-        response = _NO_RESPONSE
+        response = DEFAULT_AGENT_RESPONSE
         timestamp = None
         final_seen = False
-        link_map: dict[str, str] = {}
+        link_map = {}
 
         try:
             async for event in events:
                 if event.content and event.content.parts:
                     for part in event.content.parts:
                         if part.function_response and part.function_response.response:
-                            self._collect_link_map(part.function_response.response, link_map)
+                            self._get_link_map(part.function_response.response, link_map)
 
                 if not final_seen and event.is_final_response():
                     final_seen = True
@@ -413,23 +356,16 @@ class AgentRunner:
                     elif event.actions and event.actions.escalate:
                         response = f"Agent escalated: {event.error_message or 'No specific message.'}"
         finally:
-            # A cancelled or failed loop leaves the generator suspended. Close it
-            # so ADK releases its model stream and MCP sessions deterministically.
             await events.aclose()
-
         if response and link_map:
             response = _LINK_ID_PATTERN.sub(lambda m: link_map.get(m.group(0), m.group(0)), response)
-
         if timestamp is None:
-            # The run ended without any final event. Stamp the fallback reply with
-            # now so the response stays well-formed instead of failing on None.
             logger.warning(f"Agent produced no final response for session {session_id} of user {user_id}")
             timestamp = time.time()
 
         return response, timestamp
 
     async def _record_run_error(self, user_id: str, session_id: str, error: Exception):
-        """Append the failure to the session. Never raises: a failed write must not replace the run's own error."""
         try:
             session = await self._session_service.get_session(
                 app_name=self._app_name,
@@ -444,3 +380,26 @@ class AgentRunner:
                 ))
         except Exception as e:
             logger.exception(f"Failed to record run error for session {session_id} of user {user_id}: {str(e)}")
+
+    async def run(
+            self,
+            user_id: str,
+            session_id: str,
+            request: RunAgentRequest,
+            image_file: UploadFile | None = None
+    ) -> RunAgentResponse:
+        try:
+            if not await self._session_lock.acquire(self._app_name, user_id, session_id):
+                raise ValueError(f"Session {session_id} of user {user_id} has a run in progress")
+
+            content = await self._build_user_content(user_id, session_id, request.query, image_file)
+            response, timestamp = await self._get_agent_response(user_id, session_id, content)
+
+            logger.info(f"Run agent for session {session_id} of user {user_id} with {response}")
+            return RunAgentResponse(response=response, timestamp=convert_unix_to_datetime(timestamp))
+        except Exception as e:
+            logger.exception(f"Failed to run agent for session {session_id} of user {user_id}: {str(e)}")
+            await self._record_run_error(user_id, session_id, e)
+            raise
+        finally:
+            await self._session_lock.release(app_name=self._app_name, user_id=user_id, session_id=session_id)

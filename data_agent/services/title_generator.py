@@ -4,26 +4,22 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from common.constants import AppNames
-from data_agent.agents import system_agent
-from data_agent.agents.plugins import TimingLoggerPlugin
+from data_agent.agents import title_agent
 
 logger = logging.getLogger(__name__)
 
 
 class TitleGenerator:
     def __init__(self):
-        self._app_name = AppNames.SYSTEM
+        self._app_name = AppNames.TITLE
         self._session_service = InMemorySessionService()
         self._runner = Runner(
-            agent=system_agent,
-            app_name=AppNames.SYSTEM,
-            session_service=self._session_service,
-            plugins=[TimingLoggerPlugin()]
+            agent=title_agent,
+            app_name=AppNames.TITLE,
+            session_service=self._session_service
         )
 
     async def generate(self, user_id: str, session_id: str, user_message: str) -> str:
-        # The scratch session is created before the try so the finally never
-        # references a session that failed to exist, and is always deleted.
         session = await self._session_service.create_session(app_name=self._app_name, user_id=user_id)
         try:
             content = types.Content(role="user", parts=[types.Part(text=user_message)])
@@ -43,8 +39,8 @@ class TitleGenerator:
                 session_id=session.id
             )
 
-    async def _collect_title(self, user_id: str, scratch_session_id: str, content: types.Content) -> str:
-        events = self._runner.run_async(user_id=user_id, session_id=scratch_session_id, new_message=content)
+    async def _collect_title(self, user_id: str, session_id: str, content: types.Content) -> str:
+        events = self._runner.run_async(user_id=user_id, session_id=session_id, new_message=content)
         try:
             async for event in events:
                 if event.is_final_response() and event.content and event.content.parts:

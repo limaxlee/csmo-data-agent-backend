@@ -23,12 +23,8 @@ class CreateSessionResponse(BaseModel):
     session_id: str
 
 
-class RenameSessionRequest(BaseModel):
-    session_title: str
-
-
-class CreateSessionTitleResponse(BaseModel):
-    session_title: str
+class GetSessionResponse(SessionInfo):
+    pass
 
 
 class LoadSessionArtifactRequest(BaseModel):
@@ -42,16 +38,23 @@ class LoadSessionArtifactResponse(BaseModel):
     media_type: str
 
 
+class GetRunStateResponse(BaseModel):
+    session_id: str
+    run_state: RunState
+
+
+class RenameSessionRequest(BaseModel):
+    session_title: str
+
+
+class CreateSessionTitleResponse(BaseModel):
+    session_title: str
+
+
 class RunAgentRequest(BaseModel):
     query: str
-    new_session: bool = False
 
 
 class RunAgentResponse(BaseModel):
     response: str
     timestamp: datetime
-
-
-class GetRunStateResponse(BaseModel):
-    session_id: str
-    run_state: RunState

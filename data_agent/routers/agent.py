@@ -1,11 +1,13 @@
-import time
 import logging
 from typing import Annotated
-from fastapi import APIRouter, status, HTTPException, Path, Depends, Request, UploadFile, File, Response
+from fastapi import APIRouter, status, HTTPException, Path, Depends, Request, Response, UploadFile, File
 
-from common.exceptions import SessionBusyError
+from data_agent.schemas import (
+    CreateSessionResponse, ListSessionsResponse, GetSessionResponse,
+    LoadSessionArtifactRequest, GetRunStateResponse, RenameSessionRequest,
+    CreateSessionTitleResponse, RunAgentRequest, RunAgentResponse
+)
 from data_agent.services import AgentRunner
-from data_agent.schemas import *
 
 logger = logging.getLogger(__name__)
 
@@ -17,21 +19,6 @@ def get_agent_runner(request: Request) -> AgentRunner:
 
 
 AgentRunnerDep = Annotated[AgentRunner, Depends(get_agent_runner)]
-
-
-@router.get(
-    "/users/{user_id}/sessions",
-    response_model=ListSessionsResponse,
-    status_code=status.HTTP_200_OK
-)
-async def list_sessions(
-        user_id: Annotated[str, Path()],
-        agent_runner: AgentRunnerDep
-):
-    try:
-        return await agent_runner.list_sessions(user_id=user_id)
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.post(
@@ -49,40 +36,48 @@ async def create_session(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@router.post(
-    "/users/{user_id}/sessions/{session_id}/title",
-    response_model=CreateSessionTitleResponse,
+@router.get(
+    "/users/{user_id}/sessions",
+    response_model=ListSessionsResponse,
     status_code=status.HTTP_200_OK
 )
-async def create_session_title(
+async def list_sessions(
         user_id: Annotated[str, Path()],
-        session_id: Annotated[str, Path()],
         agent_runner: AgentRunnerDep
 ):
     try:
-        return await agent_runner.create_session_title(user_id, session_id)
-    except SessionBusyError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        return await agent_runner.list_sessions(user_id=user_id)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@router.patch(
-    "/users/{user_id}/sessions/{session_id}/title",
+@router.delete(
+    "/users/{user_id}/sessions/{session_id}",
     status_code=status.HTTP_200_OK
 )
-async def rename_session_title(
+async def delete_session(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
-        request: Annotated[RenameSessionRequest, Depends()],
         agent_runner: AgentRunnerDep
 ):
     try:
-        await agent_runner.rename_session_title(user_id, session_id, request)
-    except SessionBusyError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        await agent_runner.delete_session(user_id=user_id, session_id=session_id)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get(
+    "/users/{user_id}/sessions/{session_id}",
+    response_model=GetSessionResponse,
+    status_code=status.HTTP_200_OK
+)
+async def get_session(
+        user_id: Annotated[str, Path()],
+        session_id: Annotated[str, Path()],
+        agent_runner: AgentRunnerDep
+):
+    try:
+        return await agent_runner.get_session(user_id=user_id, session_id=session_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -124,41 +119,43 @@ async def get_session_run_state(
         agent_runner: AgentRunnerDep
 ):
     try:
-        run_state = await agent_runner.get_session_run_state(user_id=user_id, session_id=session_id)
-        return GetRunStateResponse(session_id=session_id, run_state=run_state)
+        return await agent_runner.get_session_run_state(user_id=user_id, session_id=session_id)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@router.get(
-    "/users/{user_id}/sessions/{session_id}",
-    response_model=SessionInfo,
+@router.patch(
+    "/users/{user_id}/sessions/{session_id}/title",
     status_code=status.HTTP_200_OK
 )
-async def get_session(
+async def rename_session_title(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
+        request: Annotated[RenameSessionRequest, Depends()],
         agent_runner: AgentRunnerDep
 ):
     try:
-        return await agent_runner.get_session(user_id=user_id, session_id=session_id)
+        await agent_runner.rename_session_title(user_id, session_id, request)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@router.delete(
-    "/users/{user_id}/sessions/{session_id}",
+@router.post(
+    "/users/{user_id}/sessions/{session_id}/title",
+    response_model=CreateSessionTitleResponse,
     status_code=status.HTTP_200_OK
 )
-async def delete_session(
+async def create_session_title(
         user_id: Annotated[str, Path()],
         session_id: Annotated[str, Path()],
         agent_runner: AgentRunnerDep
 ):
     try:
-        await agent_runner.delete_session(user_id=user_id, session_id=session_id)
+        return await agent_runner.create_session_title(user_id, session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
@@ -175,22 +172,14 @@ async def run(
         agent_runner: AgentRunnerDep,
         image_file: UploadFile | None = File(None),
 ):
-    t0 = time.monotonic()
-    logger.info(f"[TIMING] /run API START session={session_id} query={request.query!r}")
     try:
-        result = await agent_runner.run(
+        return await agent_runner.run(
             user_id=user_id,
             session_id=session_id,
             request=request,
             image_file=image_file
         )
-        logger.info(f"[TIMING] /run API END session={session_id} elapsed={time.monotonic() - t0:.2f}s")
-        return result
-    except SessionBusyError as e:
-        # A run is already in progress for this session. The frontend should
-        # keep the user's draft and show a "still responding" notice.
-        logger.info(f"[TIMING] /run REJECTED (busy) session={session_id} elapsed={time.monotonic() - t0:.2f}s")
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        logger.info(f"[TIMING] /run FAILED session={session_id} elapsed={time.monotonic() - t0:.2f}s")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

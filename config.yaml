@@ -1,14 +1,13 @@
 server_port: 18080
-reset_session_locks: true
 
 root_model_openapi:
-  model: openai/qwen/qwen3.8-flash-next-w4a16
-  endpoint: https://dice.gtrai.sec.samsung.net/v1
+  model: openai/qwen/qwen3.8-flash-next
+  endpoint: https://mlp-service.n10.sr-cloud.com/service-gtr-ai-vision-dice-agent/v1
   client_key: client-key
   pass_key: pass-key
-  model_id: 1
+  model_id: 605
 
-system_model_openapi:
+title_model_openapi:
   model: openai//mnt/models
   endpoint: https://genai-openapi.sec.samsung.net/dxhq/trial/api-llm/openapi/llm
   client_key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbGllbnRJZCI6IjkzYWMzMjY1LTljNzktNDE1ZS1hNDUwLTYwNzY3ZTY2Yjk2Ny0xMDMyOCIsImNsaWVudFNlY3JldCI6ImlrV0VFS3ZmWHFNYUxUQjZMenY5ZVlBRU5BdVcycXdSIiwiZXhwIjoxNzk1MTAwMzk5fQ.QV9hl4pJvbiPdOXSYMV1GfZtzv0fw7K8jGl39vABIGU
@@ -30,7 +29,7 @@ postgresql_db:
   user: postgres
 
 object_storage:
-  bucket: cosmo-storage-stage
+  bucket: cosmo-storage
   endpoint: https://gage.ap-northeast-2.samsungspc.com
   access_key: AKIA5PMO9S8UVFAFT68P
   secret_key: gCBynEY51EVVuV901dEybGl8JnwoPkQy9YK7AbjW

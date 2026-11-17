@@ -1,0 +1,125 @@
+name: Publish Backend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'alembic/**'
+      - 'alembic.ini'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - '.github/workflows/docker-publish.yaml'
+  workflow_dispatch:
+    inputs:
+      tag_override:
+        description: 'Override image tag (leave empty for CalVer-sha)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: defect-studio-gitops-stage
+  cancel-in-progress: false
+
+env:
+  REGISTRY: dice-docker-local.bart.sec.samsung.net
+  IMAGE: dice-docker-local.bart.sec.samsung.net/defect-studio-backend
+  GITOPS_REPO: GT8-AutomationVision/argocd-application-repository
+  GITOPS_FILE: environments/stage/defect-studio.yaml
+
+jobs:
+  build:
+    runs-on: [code-linux, code-xlarge]
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Check if internal mirror
+        id: check
+        run: |
+          if [ "${{ vars.ENABLE_INTERNAL_MIRROR }}" != "true" ]; then
+            echo "::error::Internal mirror not enabled (set ENABLE_INTERNAL_MIRROR=true)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Generate immutable tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag_override }}" ]; then
+            TAG="${{ inputs.tag_override }}"
+          else
+            TAG="$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $TAG"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: defect-studio-backend-${{ github.run_id }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+
+  gitops-stage:
+    needs: build
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Update stage image tag in GitOps repo
+        env:
+          GITOPS_TOKEN: ${{ secrets.GITOPS_REPO_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GITOPS_TOKEN" ]; then
+            echo "::error::GITOPS_REPO_TOKEN secret is not configured"
+            exit 1
+          fi
+          git clone \
+            "https://x-access-token:${GITOPS_TOKEN}@github.sec.samsung.net/${GITOPS_REPO}.git" \
+            gitops
+          cd gitops
+          python3 - "$GITOPS_FILE" "$TAG" <<'PY'
+          import re, sys
+          path, tag = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              text = f.read()
+          # Replace the tag under the `backend:` block only.
+          new, n = re.subn(
+              r'(?m)^(backend:\n(?:  .*\n)*?  tag: )"[^"]*"', r'\g<1>"' + tag + '"', text, count=1)
+          if n != 1:
+              sys.exit("could not locate backend.tag in " + path)
+          with open(path, 'w') as f:
+              f.write(new)
+          PY
+          git config user.name "defect-studio-ci"
+          git config user.email "defect-studio-ci@noreply.sec.samsung.net"
+          git add "$GITOPS_FILE"
+          if git diff --cached --quiet; then
+            echo "No changes to commit (tag already $TAG)"
+            exit 0
+          fi
+          git commit -m "chore(defect-studio): stage backend image $TAG"
+          git push origin main

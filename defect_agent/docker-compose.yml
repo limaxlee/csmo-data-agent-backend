@@ -1,0 +1,95 @@
+name: defect-local-stage
+
+x-app: &app
+  image: defect-studio-local-backend:dev
+  build:
+    context: .
+    args:
+      HTTP_PROXY: ${HTTPS_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${HTTPS_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      no_proxy: ${NO_PROXY:-}
+  pull_policy: build
+  env_file: .env
+  environment: &app-env
+    # .env retains the host uv connection; containers use Compose DNS instead.
+    DATABASE_URL: postgresql+psycopg2://defect:${LOCAL_DB_PASSWORD:?Set LOCAL_DB_PASSWORD in .env}@db:5432/defect_stage_local
+    HOST: 0.0.0.0
+    PORT: "8080"
+    DEBUG: "false"
+    PYTHONUNBUFFERED: "1"
+    # HTTPX otherwise uses certifi instead of the corporate CA installed by Dockerfile.
+    SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+    # SR Agent SSE must bypass the corporate proxy even with an older .env.
+    # Keep both cases identical: lowercase may otherwise override uppercase.
+    NO_PROXY: db,localhost,127.0.0.1,mlp-service.n10.sr-cloud.com,${NO_PROXY:-},${no_proxy:-}
+    no_proxy: db,localhost,127.0.0.1,mlp-service.n10.sr-cloud.com,${NO_PROXY:-},${no_proxy:-}
+  volumes:
+    - ./src:/app/src:ro
+    - ./alembic:/app/alembic:ro
+    - ./alembic.ini:/app/alembic.ini:ro
+    - app-artifacts:/app/artifacts
+    - app-cache:/app/.cache
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: defect_stage_local
+      POSTGRES_USER: defect
+      POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD:?Set LOCAL_DB_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${LOCAL_DB_PORT:-15439}:5432"
+    volumes:
+      - local-stage-db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U defect -d defect_stage_local"]
+      interval: 2s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: [alembic, upgrade, head]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    <<: *app
+    # Same FastAPI app as deployment; reload is only for local code changes.
+    command: [uvicorn, src.container.app:app, --host, "0.0.0.0", --port, "8080", --reload]
+    environment:
+      <<: *app-env
+      PGAPPNAME: defect-studio-api
+    ports:
+      - "127.0.0.1:${LOCAL_API_PORT:-18089}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, curl, --noproxy, "*", --fail, --silent, http://127.0.0.1:8080/api/health]
+      interval: 5s
+      timeout: 3s
+      start_period: 15s
+      retries: 12
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: [python, -m, src.data_integration.infrastructure.input_worker]
+    environment:
+      <<: *app-env
+      PGAPPNAME: defect-studio-worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  local-stage-db:
+  app-artifacts:
+  app-cache:

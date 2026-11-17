@@ -1,0 +1,235 @@
+name: Deploy Defect Studio Production
+run-name: Deploy Defect Studio production from ${{ inputs.stage_revision }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_revision:
+        description: 'Full GitOps commit SHA currently Synced/Healthy in defect-stage'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: defect-studio-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: dice-docker-local.bart.sec.samsung.net
+  FRONTEND_IMAGE: dice-docker-local.bart.sec.samsung.net/defect-studio-frontend
+  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+  ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+  ARGOCD_ROOT_PATH: ${{ vars.ARGOCD_ROOT_PATH || '/argo' }}
+  ARGOCD_INSECURE: ${{ vars.ARGOCD_INSECURE || 'false' }}
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: [code-linux, code-xlarge]
+    timeout-minutes: 45
+    steps:
+      - name: Check deployment credentials and tools
+        env:
+          FRONTEND_REPO_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for key in FRONTEND_REPO_TOKEN DOCKER_USERNAME DOCKER_PASSWORD ARGOCD_SERVER ARGOCD_AUTH_TOKEN; do
+            test -n "${!key}" || { echo "::error::$key is required"; exit 1; }
+          done
+          command -v jq
+
+      - name: Install uv when absent on the runner
+        run: |
+          set -euo pipefail
+          if ! command -v uv >/dev/null; then
+            curl -fsSL --retry 3 https://astral.sh/uv/0.11.11/install.sh -o "$RUNNER_TEMP/install-uv.sh"
+            UV_INSTALL_DIR="$RUNNER_TEMP/defect-uv" UV_NO_MODIFY_PATH=1 sh "$RUNNER_TEMP/install-uv.sh"
+            echo "$RUNNER_TEMP/defect-uv" >> "$GITHUB_PATH"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          path: gitops
+
+      - name: Install Argo CD CLI
+        env:
+          CLI_URL: ${{ vars.ARGOCD_CLI_URL || 'https://bart.sec.samsung.net/artifactory/dice-generic-local/argocd-linux-amd64' }}
+          CLI_SHA256: ${{ vars.ARGOCD_CLI_SHA256 }}
+          CLI_USERNAME: ${{ secrets.ARGOCD_CLI_USERNAME || secrets.DOCKER_USERNAME }}
+          CLI_PASSWORD: ${{ secrets.ARGOCD_CLI_PASSWORD || secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$CLI_SHA256" || { echo '::error::Set ARGOCD_CLI_SHA256 for the approved Argo CD binary'; exit 1; }
+          tool_dir="$RUNNER_TEMP/defect-argocd"
+          mkdir -p "$tool_dir"
+          curl -fsSL --retry 3 -u "$CLI_USERNAME:$CLI_PASSWORD" "$CLI_URL" -o "$tool_dir/argocd-bin"
+          echo "$CLI_SHA256  $tool_dir/argocd-bin" | sha256sum -c -
+          chmod +x "$tool_dir/argocd-bin"
+          cat > "$tool_dir/argocd" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=(--grpc-web --grpc-web-root-path "$ARGOCD_ROOT_PATH")
+          if [ "$ARGOCD_INSECURE" = true ]; then args+=(--insecure); fi
+          exec "$(dirname "$0")/argocd-bin" "${args[@]}" "$@"
+          SH
+          chmod +x "$tool_dir/argocd"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+
+      - name: Validate the verified staging snapshot
+        id: release
+        working-directory: gitops
+        env:
+          STAGE_REVISION: ${{ inputs.stage_revision }}
+          RELEASE_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          argocd app get defect-stage --refresh -o json > "$RUNNER_TEMP/defect-stage.json"
+          argocd app get defect-prod --refresh -o json > "$RUNNER_TEMP/defect-prod.json"
+          # Register the matching configuration-repository Applications first. Never override the
+          # declared Application or silently enable production auto-sync.
+          jq -e '.spec.source.path == "charts/defect-studio" and
+            .spec.source.repoURL == "https://github.sec.samsung.net/GT8-AutomationVision/argocd-application-repository.git" and
+            .spec.destination.namespace == "dice" and
+            .spec.source.helm.valueFiles == ["../../environments/production/defect-studio.yaml"] and
+            ((.spec.source.helm.parameters // []) | length == 0) and
+            (.spec.sources == null or .spec.sources == []) and
+            (.spec.syncPolicy.automated == null) and
+            (.operation == null)' "$RUNNER_TEMP/defect-prod.json"
+          uv run --locked --no-dev python scripts/production.py snapshot \
+            "$STAGE_REVISION" "$RUNNER_TEMP/defect-stage.json" "$RELEASE_RUN"
+          echo "baseline_revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: GT8-AutomationVision/defect-studio-train-service
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.FRONTEND_REPO_TOKEN }}
+          path: frontend
+
+      - name: Resolve the stage frontend source commit
+        id: frontend
+        working-directory: frontend
+        env:
+          FRONTEND_REF: ${{ steps.release.outputs.frontend_ref }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse --verify "$FRONTEND_REF^{commit}")"
+          git merge-base --is-ancestor "$commit" origin/main
+          git checkout --detach "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: defect-studio-prod-${{ github.run_id }}
+          driver: docker-container
+          use: true
+
+      - uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build the production frontend from the verified commit
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: frontend
+          push: true
+          tags: ${{ env.FRONTEND_IMAGE }}:${{ steps.release.outputs.frontend_tag }}
+          build-args: |
+            NODE_IMAGE=docker-remote.bart.sec.samsung.net/node:22-slim@sha256:9f0dde62d10e7ff7a310ecaebd66225f6b46c17e6cb778449a77b05d3541bea2
+            NGINX_IMAGE=docker-remote.bart.sec.samsung.net/nginx:1.30.6-trixie@sha256:b565a9579cdabe43de09a5a278dc95ceee721dae1cacf85247effc4f6630d511
+            VITE_BASE_PATH=/defect/
+            VITE_AGENT_API_URL=/defect
+            VITE_AUTH_BASE_URL=/auth
+            VITE_DEPLOYMENT_ENV=production
+            VITE_ENABLE_TEMP_PASSWORD_LOGIN=false
+
+      - name: Validate the production web server image
+        env:
+          FRONTEND_TAG: ${{ steps.release.outputs.frontend_tag }}
+        run: |
+          set -euo pipefail
+          docker run --rm "$FRONTEND_IMAGE:$FRONTEND_TAG" \
+            sh -c 'nginx -t && test -s /usr/share/nginx/html/defect/index.html'
+
+      - name: Commit production image tags with push retries
+        id: gitops
+        working-directory: gitops
+        env:
+          STAGE_REVISION: ${{ inputs.stage_revision }}
+          BACKEND_TAG: ${{ steps.release.outputs.backend_tag }}
+          FRONTEND_TAG: ${{ steps.release.outputs.frontend_tag }}
+          BASELINE_REVISION: ${{ steps.release.outputs.baseline_revision }}
+        run: |
+          set -euo pipefail
+          git config user.name defect-studio-ci
+          git config user.email defect-studio-ci@noreply.sec.samsung.net
+          uv run --locked --no-dev python scripts/production.py promote "$BACKEND_TAG" "$FRONTEND_TAG"
+          git add environments/production/defect-studio.yaml
+          git commit -m "chore(defect-studio): production release $FRONTEND_TAG (#136)"
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git rebase origin/main
+            # Do not deploy unverified chart or runtime configuration changes
+            # that landed while the production frontend was building.
+            uv run --locked --no-dev python scripts/production.py check-config "$STAGE_REVISION" "$BASELINE_REVISION"
+            if git push origin HEAD:main; then
+              echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            sleep 2
+          done
+
+      - name: Sync the exact production release
+        env:
+          RELEASE_REVISION: ${{ steps.gitops.outputs.revision }}
+        run: |
+          set -euo pipefail
+          argocd app sync defect-prod --revision "$RELEASE_REVISION" --prune --timeout 300
+          # main may advance due to stage CI. Check the applied release SHA,
+          # rather than requiring production to match the newer main HEAD.
+          argocd app wait defect-prod --health --operation --timeout 600
+          argocd app get defect-prod -o json > "$RUNNER_TEMP/defect-result.json"
+          jq -e --arg revision "$RELEASE_REVISION" '
+            .status.operationState.phase == "Succeeded" and
+            .status.operationState.syncResult.revision == $revision and
+            .status.health.status == "Healthy"' "$RUNNER_TEMP/defect-result.json"
+
+      - name: Check the production HTTP URL
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-redirs 5 --retry 5 --retry-all-errors --retry-delay 5 \
+            --max-time 30 http://dice.gtrai.sec.samsung.net/defect/ -o /dev/null
+          curl --fail --location --max-redirs 5 --max-time 30 http://dice.gtrai.sec.samsung.net/defect/api/health
+          # Use a synthetic cookie; never read or log a user's session cookie.
+          printf -v large_cookie '%24576s' ''
+          large_cookie="${large_cookie// /x}"
+          curl --fail --max-time 30 -H "Cookie: deployment_probe=$large_cookie" \
+            https://dice.gtrai.sec.samsung.net/defect/ -o /dev/null
+
+      - name: Record the production release
+        env:
+          STAGE_REVISION: ${{ inputs.stage_revision }}
+          RELEASE_REVISION: ${{ steps.gitops.outputs.revision }}
+          BACKEND_TAG: ${{ steps.release.outputs.backend_tag }}
+          FRONTEND_TAG: ${{ steps.release.outputs.frontend_tag }}
+          FRONTEND_COMMIT: ${{ steps.frontend.outputs.commit }}
+        run: |
+          {
+            echo 'Production: http://dice.gtrai.sec.samsung.net/defect/'
+            echo "Stage GitOps SHA: $STAGE_REVISION"
+            echo "Production GitOps SHA: $RELEASE_REVISION"
+            echo "Backend: $BACKEND_TAG"
+            echo "Frontend: $FRONTEND_TAG (source $FRONTEND_COMMIT)"
+            echo 'Task: GT8-AutomationVision/defect-studio-backend-service#136'
+          } >> "$GITHUB_STEP_SUMMARY"

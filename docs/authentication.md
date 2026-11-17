@@ -1,5 +1,7 @@
 # Authentication and SSO design
 
+> **Superseded on 2026-11-17.** The design below (this backend as its own OIDC client with a cookie session) is no longer pursued. The data agent will reuse the DICE platform's central `web-auth` service JWT flow, exactly as the Defect Studio backend does. See [sso-authorization-plan.md](sso-authorization-plan.md). This file is kept for its ADFS claim research and the frontend and SSE considerations.
+
 **Repository:** `limaxlee/csmo-data-agent-backend`
 **Audience:** maintainers, the frontend team, and whoever talks to the SSO team
 **Baseline:** `main` at `9a3d572`

@@ -1,0 +1,34 @@
+Database migrations (Alembic).
+
+The application does NOT create tables at startup. The schema is produced only
+by the migrations here, so that every environment gets the same one.
+
+New database
+    alembic upgrade head
+
+Database that predates Alembic (has tables, no alembic_version)
+    alembic stamp head          # mark the baseline as applied, run nothing
+    alembic upgrade head        # apply anything newer
+
+    Running `upgrade` without stamping first fails with DuplicateTable, because
+    the baseline migration tries to create tables that already exist.
+
+Adding a migration
+    alembic revision --autogenerate -m "what changed"
+    # read the generated file before committing — autogenerate misses things
+    # like server defaults and it renders drops for anything it cannot see
+    alembic upgrade head
+
+Checking
+    alembic current             # where this database stands
+    alembic check               # does the schema match the entity definitions
+
+Notes
+    The database URL comes from src.container.settings via alembic/env.py, not
+    from alembic.ini, so migrations and the app cannot point at different
+    databases.
+
+    db_types.UUID renders as sa.Uuid() in migrations (see render_item in
+    env.py). Migrations must not import application code: they are a historical
+    record and have to keep working after that code moves.
+

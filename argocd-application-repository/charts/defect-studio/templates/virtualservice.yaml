@@ -1,0 +1,71 @@
+{{- if .Values.virtualService.enabled }}
+{{- $ns := .Release.Namespace }}
+{{- $vs := .Values.virtualService }}
+# Routing (no URI rewrite for the UI — the SPA is built with base={{ $vs.uiPath }}/):
+#   {{ $vs.uiPath }}            -> 308 to {{ $vs.uiPath }}/
+#   {{ $vs.uiPath }}/api...     -> backend, prefix rewritten to /api...
+#                                 (no route timeout so agent SSE streams survive)
+#   {{ $vs.uiPath }}/...        -> frontend static SPA
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ $vs.name }}
+spec:
+  hosts:
+    {{- toYaml $vs.hosts | nindent 4 }}
+  gateways:
+    {{- toYaml $vs.gateways | nindent 4 }}
+  http:
+    {{- if $vs.redirectHttpToHttps }}
+    # Production web-auth uses Secure cookies. Accept the requested HTTP entry
+    # URL, then use HTTPS for the SPA and its same-origin SSO requests.
+    - match:
+        - port: 80
+          uri:
+            prefix: {{ $vs.uiPath }}
+      redirect:
+        scheme: https
+        port: 443
+        redirectCode: 308
+    {{- end }}
+    - match:
+        - uri:
+            exact: {{ $vs.uiPath }}
+      redirect:
+        uri: {{ $vs.uiPath }}/
+        redirectCode: 308
+    {{- if and $vs.authPath $vs.authService }}
+    - match:
+        - uri:
+            prefix: {{ $vs.authPath }}
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: {{ $vs.authService }}
+            port:
+              number: {{ $vs.authServicePort }}
+    {{- end }}
+    - match:
+        - uri:
+            prefix: {{ $vs.apiPath }}
+      rewrite:
+        uri: /api
+      # No route timeout: Istio leaves it disabled by default, so long agent
+      # SSE streams are not cut.
+      route:
+        - destination:
+            host: {{ .Values.namePrefix }}-backend.{{ $ns }}.svc.cluster.local
+            port:
+              number: {{ .Values.backend.port }}
+    - match:
+        - uri:
+            prefix: {{ $vs.uiPath }}
+      route:
+        - destination:
+            host: {{ .Values.namePrefix }}-frontend.{{ $ns }}.svc.cluster.local
+            port:
+              number: {{ .Values.frontend.port }}
+{{- end }}
+

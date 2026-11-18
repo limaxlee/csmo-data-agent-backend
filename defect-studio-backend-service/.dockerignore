@@ -1,0 +1,14 @@
+.git
+.venv
+.env
+.env.*
+local/*.env
+**/__pycache__
+.pytest_cache
+*.db
+*.db-wal
+*.db-shm
+*.pyc
+*.egg-info/
+artifacts
+.cache

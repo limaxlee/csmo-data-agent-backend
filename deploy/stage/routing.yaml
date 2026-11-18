@@ -1,0 +1,85 @@
+# Forwarding rule for the data agent on the DICE stage address.
+#
+#   https://stage.gtrai.sec.samsung.net/data-agent/        -> 10.240.35.180:13080 (frontend)
+#   https://stage.gtrai.sec.samsung.net/data-agent/api/... -> 10.240.35.180:18080 (backend,
+#                                                             "/data-agent/api" removed)
+#
+# Apply:   kubectl apply -f routing.yaml
+# Remove:  kubectl delete -f routing.yaml
+#
+# The login paths (/auth/...) are already forwarded on this address by the
+# defect-studio-stage rule, so they are not repeated here.
+
+# Registers the data agent server (outside the cluster) under an internal name.
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: data-agent-server
+  namespace: dice-stage
+spec:
+  hosts:
+    - data-agent.external.local
+  location: MESH_EXTERNAL
+  resolution: STATIC
+  endpoints:
+    - address: 10.240.35.180
+  ports:
+    - name: http-frontend
+      number: 13080
+      protocol: HTTP
+    - name: http-backend
+      number: 18080
+      protocol: HTTP
+  # The gateway runs in istio-system and has to see this entry.
+  exportTo:
+    - "."
+    - istio-system
+---
+# Sends the /data-agent paths on the stage address to that server.
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: data-agent-stage
+  namespace: dice-stage
+spec:
+  hosts:
+    - stage.gtrai.sec.samsung.net
+  gateways:
+    - istio-system/platform-gateway
+  http:
+    # http -> https (the login cookie is only sent over https)
+    - match:
+        - port: 80
+          uri:
+            prefix: /data-agent
+      redirect:
+        scheme: https
+        port: 443
+        redirectCode: 308
+    # /data-agent -> /data-agent/
+    - match:
+        - uri:
+            exact: /data-agent
+      redirect:
+        uri: /data-agent/
+        redirectCode: 308
+    # Backend. Must stay above the frontend rule: the first match wins.
+    - match:
+        - uri:
+            prefix: /data-agent/api/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: data-agent.external.local
+            port:
+              number: 18080
+    # Frontend.
+    - match:
+        - uri:
+            prefix: /data-agent/
+      route:
+        - destination:
+            host: data-agent.external.local
+            port:
+              number: 13080

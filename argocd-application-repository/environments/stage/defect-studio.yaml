@@ -1,0 +1,71 @@
+# Stage values for the defect-studio chart.
+# Referenced by the defect-stage Argo CD Application
+# (argocd-configuration-repository/applications/dice-stage/defect-studio.yaml).
+
+namePrefix: defect-studio
+
+# Four native ZIP tasks ran into the previous 2-CPU quota. Reserve two CPUs
+# and allow four during conversion; memory usage remains within the 2Gi limit.
+# Up to 64 deferred previews: 4 Pods x 16 slots. Deploy DB capacity/backend first.
+inputWorker:
+  replicas: 4
+  env:
+    NATIVE_THUMBNAIL_WORKERS: "16"
+    NATIVE_THUMBNAIL_MEMORY_MIB: "16384"
+  resources:
+    requests:
+      cpu: "4"
+      memory: 16Gi
+    limits:
+      cpu: "8"
+      memory: 24Gi
+
+backend:
+  resources:
+    requests:
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+  # Built by defect-studio-backend-service .github/workflows/docker-publish.yaml
+  # from commit 2f8dd31 (main).
+  tag: "2026.11.17-a39721f"
+  env:
+    MAX_CONCURRENT_TRAININGS: "1"
+    CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173"]'
+    # DefectAgent deployed on the SR cloud MLP platform.
+    # Verified reachable from the dice-stage backend pod (TLS via Let's Encrypt,
+    # /internal/agent contract matches AgentHttpClient).
+    AGENT_SERVICE_BASE_URL: "https://mlp-service.n10.sr-cloud.com/service-gtr-ai-vision-defect-agent"
+    # The corporate HTTPS proxy buffers idle Agent SSE responses. Reach the
+    # MLP host directly, preserving the existing cluster/S3 proxy exclusions.
+    NO_PROXY: "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,gage.ap-northeast-2.samsungspc.com,mlp-service.n10.sr-cloud.com"
+    # Temporary payload-free raw-byte/line/frame timing for missing plan prompts.
+    AGENT_SSE_TRANSPORT_DIAGNOSTICS: "true"
+    MINIO_ENDPOINT: "gage.ap-northeast-2.samsungspc.com"
+    MINIO_BUCKET: "defect-agent"
+    MINIO_SECURE: "true"
+    MINIO_VERIFY_SSL: "false"
+  secret:
+    # Pre-existing secret in dice-stage (NOT in git).
+    name: defect-studio-stage-secrets
+
+frontend:
+  # Built by defect-studio-train-service .github/workflows/docker-publish-frontend.yaml
+  # from commit 4210ccd (feat/107-frontend-sso-login). Stage image enables the
+  # flagged temporary-password login for shared stage test accounts.
+  tag: "2026.11.16-4bf2eab-stage"
+
+virtualService:
+  name: defect-studio-stage
+  # Redirect HTTP entry URLs to HTTPS on platform-gateway so the SPA runs in a
+  # browser SecureContext matching production.
+  redirectHttpToHttps: true
+  hosts:
+    - stage.gtrai.sec.samsung.net
+  # subdomain-gateway no longer exists in istio-system (only dev-gateway and
+  # platform-gateway remain). platform-gateway serves *.gtrai.sec.samsung.net
+  # (TLS SIMPLE, cert "tls"); /defect*, /auth prefixes do not collide with the
+  # cosmo-stage-vs routes on the same gateway+host, so Istio merges them.
+  gateways:
+    - istio-system/platform-gateway
+  authService: dice-stage-platform-web-auth.dice-stage.svc.cluster.local

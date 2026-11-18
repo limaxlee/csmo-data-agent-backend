@@ -1,0 +1,70 @@
+{
+  "name": "defect-studio-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "build": "tsc && vite build",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "test-storybook": "test-storybook",
+    "test-storybook:local": "node scripts/run-storybook-tests.mjs"
+  },
+  "dependencies": {
+    "@defect-studio/api-client": "workspace:*",
+    "@defect-studio/contracts": "workspace:*",
+    "@defect-studio/image-masking": "workspace:*",
+    "@defect-studio/ui": "workspace:*",
+    "@tanstack/react-query": "catalog:",
+    "class-variance-authority": "catalog:",
+    "lucide-react": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "react-hot-toast": "catalog:",
+    "react-markdown": "catalog:",
+    "react-virtuoso": "catalog:",
+    "remark-gfm": "catalog:",
+    "zustand": "catalog:"
+  },
+  "devDependencies": {
+    "@defect-studio/eslint-config": "workspace:*",
+    "@defect-studio/test-utils": "workspace:*",
+    "@storybook/addon-essentials": "catalog:",
+    "@storybook/react": "catalog:",
+    "@storybook/react-vite": "catalog:",
+    "@storybook/test": "catalog:",
+    "@storybook/test-runner": "catalog:",
+    "@testing-library/dom": "catalog:",
+    "@testing-library/jest-dom": "catalog:",
+    "@testing-library/react": "catalog:",
+    "@testing-library/user-event": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "autoprefixer": "catalog:",
+    "eslint": "catalog:",
+    "jsdom": "catalog:",
+    "msw": "catalog:",
+    "msw-storybook-addon": "catalog:",
+    "postcss": "catalog:",
+    "storybook": "catalog:",
+    "storybook-dark-mode": "catalog:",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}

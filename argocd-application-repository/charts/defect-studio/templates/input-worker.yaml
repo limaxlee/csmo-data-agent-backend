@@ -1,0 +1,85 @@
+{{- $name := .Values.namePrefix -}}
+{{- /* Background worker for native S3 ZIP imports and expired staging cleanup.
+       Deployed alongside every enabled backend: it uses PostgreSQL advisory locks
+       for per-thread serialization/recovery and shares the backend's S3 settings. */}}
+{{- if .Values.backend.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-input-worker
+  labels:
+    app.kubernetes.io/name: defect-studio
+    app.kubernetes.io/component: input-worker
+spec:
+  replicas: {{ .Values.inputWorker.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defect-studio
+      app.kubernetes.io/component: input-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defect-studio
+        app.kubernetes.io/component: input-worker
+    spec:
+      {{- if gt (int .Values.inputWorker.replicas) 1 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: defect-studio
+              app.kubernetes.io/component: input-worker
+      {{- end }}
+      imagePullSecrets:
+        {{- range .Values.backend.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      containers:
+        - name: input-worker
+          image: "{{ .Values.backend.image }}:{{ .Values.backend.tag }}"
+          imagePullPolicy: {{ .Values.backend.imagePullPolicy }}
+          command: ["python", "-m", "src.data_integration.infrastructure.input_worker"]
+          env:
+            # Compatibility with pre-refactor images until both environments
+            # have promoted the new backend; no environment-specific switches.
+            - {name: SSO_ENABLED, value: "true"}
+            - {name: PASSWORD_REGISTRATION_ENABLED, value: "false"}
+            {{- range $k, $v := mergeOverwrite (deepCopy .Values.backend.env) .Values.inputWorker.env }}
+            {{- if ne (toString $v) "" }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.databaseUrl }}
+            - name: SERVICE_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.serviceJwtSecret }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.secretKey }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.minioAccessKey }}
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.minioSecretKey }}
+          resources:
+            {{- toYaml .Values.inputWorker.resources | nindent 12 }}
+{{- end }}

@@ -1,0 +1,36 @@
+# FastAPI
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Database
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+asyncpg==0.30.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+cryptography>=43.0.0
+bcrypt==4.2.1
+
+# Object Storage (MinIO/S3)
+minio==7.2.12
+boto3<1.35
+
+# HTTP client (for agent_service proxy)
+httpx==0.28.1
+
+# Config
+pydantic-settings==2.7.0
+pydantic[email]==2.10.4
+
+# Utils
+python-dotenv==1.0.1
+
+# Image processing (PNG conversion on upload)
+Pillow>=10.0.0
+
+# Streaming ZIP archive generation (batch image download endpoint)
+zipstream-ng>=1.0.0
+

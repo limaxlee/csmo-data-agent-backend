@@ -1,0 +1,15 @@
+{{- if .Values.frontend.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.namePrefix }}-frontend-nginx
+  labels:
+    app.kubernetes.io/name: defect-studio
+    app.kubernetes.io/component: frontend
+data:
+  header-buffers.conf: |
+    # Included inside http {}. Accept the shared SSO cookies before serving SPA.
+    client_header_buffer_size {{ .Values.frontend.nginx.clientHeaderBufferSize }};
+    large_client_header_buffers {{ .Values.frontend.nginx.largeClientHeaderBuffers }};
+{{- end }}
+

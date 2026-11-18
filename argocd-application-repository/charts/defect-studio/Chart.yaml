@@ -1,0 +1,6 @@
+apiVersion: v2
+name: defect-studio
+description: Defect Studio backend (FastAPI) + frontend (static SPA) for the Vision AI platform
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

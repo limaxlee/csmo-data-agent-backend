@@ -1,0 +1,128 @@
+# Default values for the defect-studio chart.
+# Environment values live in environments/<env>/defect-studio.yaml in this
+# repository and are referenced by the Argo CD child Applications.
+
+namePrefix: defect-studio
+
+backend:
+  enabled: true
+  image: dice-docker-local.bart.sec.samsung.net/defect-studio-backend
+  # REQUIRED: immutable tag (CalVer-sha). Never use a moving tag here.
+  tag: ""
+  replicas: 1
+  # The run queue and event consumers are process-local singletons
+  # (src/container/consumers.py). A second replica would double-consume runs
+  # while the first is still draining, so keep one replica and recreate on
+  # deploy instead of a rolling surge.
+  strategy: Recreate
+  port: 8080
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets:
+    - regcred
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Alembic upgrade head runs as an init container before the app starts.
+  dbMigrate:
+    enabled: true
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  env:
+    # SR cloud Agent execution routes require the corporate HTTPS proxy.
+    # Keep cluster services and the S3 endpoint on their direct connections.
+    HTTPS_PROXY: "http://168.219.61.252:8080"
+    NO_PROXY: "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,gage.ap-northeast-2.samsungspc.com"
+    # DefectAgent service endpoint (FastAPI, streams run events). Empty until
+    # the agent service endpoint for this environment is confirmed.
+    AGENT_SERVICE_BASE_URL: ""
+    MAX_CONCURRENT_RUNS: "7"
+    MAX_CONCURRENT_TRAININGS: "7"
+    MINIO_ENDPOINT: ""
+    MINIO_BUCKET: ""
+    MINIO_SECURE: "true"
+    MINIO_VERIFY_SSL: "false"
+    STORAGE_ALLOW_LOCAL_FALLBACK: "false"
+    # The SPA is served same-origin behind the same host, so no CORS is needed.
+    CORS_ORIGINS: "[]"
+  secret:
+    name: defect-studio-secrets
+    keys:
+      databaseUrl: database-url
+      serviceJwtSecret: service-jwt-secret
+      # Local JWT signing key (must NOT start with "change-me"; validated at
+      # startup).
+      secretKey: secret-key
+      minioAccessKey: s3-access-key
+      minioSecretKey: s3-secret-key
+
+inputWorker:
+  replicas: 1
+  # Worker-only capacity; API resource/admission settings are independent.
+  env:
+    NATIVE_THUMBNAIL_WORKERS: "4"
+    NATIVE_THUMBNAIL_MEMORY_MIB: "1024"
+  # Tune native S3 ZIP import and staging cleanup independently of the API server.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+agentProxy:
+  enabled: true
+  address: "168.219.61.252"
+  port: 8080
+  host: digitalcity-forward-proxy.external.local
+
+frontend:
+  enabled: true
+  # Match the Platform/Labeler static servers for large central SSO cookies.
+  nginx:
+    clientHeaderBufferSize: 16k
+    largeClientHeaderBuffers: "8 32k"
+  image: dice-docker-local.bart.sec.samsung.net/defect-studio-frontend
+  # REQUIRED: immutable tag. VITE_* values are baked at image build time, so
+  # an environment-specific image is built from the same commit when needed.
+  tag: ""
+  replicas: 1
+  port: 3000
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets:
+    - regcred
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+virtualService:
+  enabled: true
+  redirectHttpToHttps: false
+  name: defect-studio
+  hosts: []
+  # platform-gateway (istio-system) serves *.gtrai.sec.samsung.net (TLS SIMPLE,
+  # cert "tls"). The former subdomain-gateway no longer exists; environment
+  # values may override this if a dedicated gateway is (re)introduced.
+  gateways:
+    - istio-system/platform-gateway
+  apiPath: /defect/api
+  uiPath: /defect
+  # Central web-auth SSO endpoints (/auth/session, /auth/token, /auth/login,
+  # /auth/logout). The live web-auth serves them at the root (no basePath), so
+  # the /auth prefix is stripped when forwarding. Empty authPath disables it.
+  authPath: /auth
+  authService: ""
+  authServicePort: 3020

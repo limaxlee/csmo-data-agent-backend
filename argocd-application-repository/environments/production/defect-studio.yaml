@@ -1,0 +1,66 @@
+# Production values for the defect-studio chart.
+# Referenced by the defect-prod Argo CD Application
+# (argocd-configuration-repository/applications/dice/defect-studio.yaml).
+#
+# Task: defect-studio-backend-service#136.
+# deploy-production.yaml promotes a verified stage backend tag and rebuilds the
+# frontend from the same source commit with production flags. Tags below remain
+# the previous release until that workflow is explicitly dispatched.
+
+namePrefix: defect-studio
+
+# Up to 64 deferred previews: 4 Pods x 16 slots. Deploy DB capacity/backend first.
+inputWorker:
+  replicas: 4
+  env:
+    NATIVE_THUMBNAIL_WORKERS: "16"
+    NATIVE_THUMBNAIL_MEMORY_MIB: "16384"
+  resources:
+    requests:
+      cpu: "4"
+      memory: 16Gi
+    limits:
+      cpu: "8"
+      memory: 24Gi
+
+backend:
+  resources:
+    requests:
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+  replicas: 1
+  # Updated only by the manual production workflow.
+  tag: "v1.0.3"
+  env:
+    # One shared Agent service for stage and production.
+    AGENT_SERVICE_BASE_URL: "https://mlp-service.n10.sr-cloud.com/service-gtr-ai-vision-defect-agent"
+    # Match the staging Agent SSE proxy bypass, preserving cluster/S3 exclusions.
+    NO_PROXY: "localhost,127.0.0.1,.svc,.svc.cluster.local,.cluster.local,gage.ap-northeast-2.samsungspc.com,mlp-service.n10.sr-cloud.com"
+    MINIO_ENDPOINT: "gage.ap-northeast-2.samsungspc.com"
+    # Shared Agent input/artifact bucket, matching Studio stage.
+    MINIO_BUCKET: "defect-agent"
+    MINIO_SECURE: "true"
+    MINIO_VERIFY_SSL: "false"
+  secret:
+    # Must exist in dice before first sync.
+    name: defect-studio-prod-secrets
+
+frontend:
+  replicas: 1
+  # Previous production frontend. Replaced only by the manual workflow.
+  tag: "v1.0.3"
+
+virtualService:
+  name: defect-studio-prod
+  # HTTP is an entry URL; SSO requires HTTPS for production Secure cookies.
+  redirectHttpToHttps: true
+  hosts:
+    - dice.gtrai.sec.samsung.net
+  # subdomain-gateway no longer exists in istio-system (only dev-gateway and
+  # platform-gateway remain). platform-gateway serves *.gtrai.sec.samsung.net
+  # (TLS SIMPLE, cert "tls"); /defect*, /auth prefixes do not collide with the
+  # istio-system/dice-vs routes on the same gateway+host, so Istio merges them.
+  gateways:
+    - istio-system/platform-gateway
+  authService: dice-platform-web-auth.dice.svc.cluster.local

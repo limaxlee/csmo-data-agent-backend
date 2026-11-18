@@ -1,0 +1,43 @@
+---
+// AX theme override for Starlight.
+//
+// Problem: Astro hoists <style is:inline> to an early position in <head>,
+// BEFORE Starlight's compiled index.css — so our CSS loses the cascade.
+//
+// Solution: Set CSS custom properties directly on document.documentElement via JS.
+// Inline style properties have the highest cascade priority and override ALL stylesheets.
+// The MutationObserver re-applies colors whenever Starlight changes data-theme.
+import Default from '@astrojs/starlight/components/Head.astro';
+---
+<Default {...Astro.props}><slot /></Default>
+<script is:inline>
+(function () {
+  // Force light theme always — dark mode removed
+  document.documentElement.setAttribute('data-theme', 'light');
+
+  var LIGHT = {
+    '--sl-color-accent-low':     '#e0e7ff',
+    '--sl-color-accent':         '#1e36b1',
+    '--sl-color-accent-high':    '#0d1772',
+    '--sl-color-white':          '#0f172a',
+    '--sl-color-gray-1':         '#0f172a',
+    '--sl-color-gray-2':         '#475563',
+    '--sl-color-gray-3':         '#64748b',
+    '--sl-color-gray-4':         '#cbd5e1',
+    '--sl-color-gray-5':         '#e2e8f0',
+    '--sl-color-gray-6':         '#f1f5f9',
+    '--sl-color-black':          '#ffffff',
+    '--sl-color-bg':             '#f1f5f9',
+    '--sl-color-bg-nav':         'rgba(255,255,255,0.92)',
+    '--sl-color-bg-sidebar':     '#ffffff',
+    '--sl-color-text':           '#0f172a',
+    '--sl-color-text-accent':    '#1e36b1',
+    '--sl-color-hairline-light': '#e2e8f0',
+    '--sl-color-hairline':       '#cbd5e1',
+    '--sl-color-hairline-shade': '#94a3b8',
+  };
+
+  var r = document.documentElement;
+  for (var k in LIGHT) r.style.setProperty(k, LIGHT[k]);
+})();
+</script>

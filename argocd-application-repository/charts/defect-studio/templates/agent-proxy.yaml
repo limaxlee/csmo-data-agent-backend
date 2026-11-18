@@ -1,0 +1,26 @@
+{{- if and .Values.backend.enabled .Values.agentProxy.enabled }}
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  # Adopt the pre-existing manually applied namespace-local proxy registration.
+  name: digitalcity-forward-proxy
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  hosts:
+    - {{ .Values.agentProxy.host | quote }}
+  addresses:
+    - {{ printf "%s/32" .Values.agentProxy.address | quote }}
+  location: MESH_EXTERNAL
+  ports:
+    # CONNECT targets the remote Agent authority, so an HTTP route for the
+    # proxy hostname cannot match it. TCP forwards the proxy protocol intact.
+    - name: tcp-proxy
+      number: {{ .Values.agentProxy.port }}
+      protocol: TCP
+  resolution: STATIC
+  endpoints:
+    - address: {{ .Values.agentProxy.address | quote }}
+  exportTo:
+    - "."
+{{- end }}

@@ -1,0 +1,124 @@
+{{- $name := .Values.namePrefix -}}
+{{- if .Values.backend.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-backend
+  labels:
+    app.kubernetes.io/name: defect-studio
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  strategy:
+    type: {{ .Values.backend.strategy }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defect-studio
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: defect-studio
+        app.kubernetes.io/component: backend
+    spec:
+      imagePullSecrets:
+        {{- range .Values.backend.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      initContainers:
+        {{- if .Values.backend.dbMigrate.enabled }}
+        # Alembic upgrade head — idempotent, fails fast before the app starts.
+        - name: db-migrate
+          image: "{{ .Values.backend.image }}:{{ .Values.backend.tag }}"
+          imagePullPolicy: {{ .Values.backend.imagePullPolicy }}
+          command: ["sh", "-c", "cd /app && alembic upgrade head"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.databaseUrl }}
+          resources:
+            {{- toYaml .Values.backend.dbMigrate.resources | nindent 12 }}
+        {{- end }}
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image }}:{{ .Values.backend.tag }}"
+          imagePullPolicy: {{ .Values.backend.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.port }}
+          env:
+            {{- /* Transitional constants for already deployed pre-refactor images.
+                   They are not configurable feature switches. New images ignore
+                   these names; remove after both environments have been promoted. */}}
+            - {name: SSO_ENABLED, value: "true"}
+            - {name: PASSWORD_REGISTRATION_ENABLED, value: "false"}
+            {{- range $k, $v := .Values.backend.env }}
+            {{- if ne $v "" }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.databaseUrl }}
+            - name: SERVICE_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.serviceJwtSecret }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.secretKey }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.minioAccessKey }}
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backend.secret.name }}
+                  key: {{ .Values.backend.secret.keys.minioSecretKey }}
+
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-backend
+  labels:
+    app.kubernetes.io/name: defect-studio
+    app.kubernetes.io/component: backend
+spec:
+  selector:
+    app.kubernetes.io/name: defect-studio
+    app.kubernetes.io/component: backend
+  ports:
+    - name: http
+      port: {{ .Values.backend.port }}
+      targetPort: http
+{{- end }}

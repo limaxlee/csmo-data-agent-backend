@@ -1,0 +1,87 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: #f7f9fc;
+  color: #0f172a;
+  font-family:
+    Pretendard,
+    SamsungOne,
+    Segoe UI,
+    Noto Sans KR,
+    Apple SD Gothic Neo,
+    Malgun Gothic,
+    sans-serif;
+}
+
+a {
+  color: inherit;
+}
+
+.activation-page {
+  min-height: 100vh;
+  padding-bottom: 64px;
+  background: #eef1f8;
+  color: #0b1226;
+  font-family: Pretendard, SamsungOne, Segoe UI, Noto Sans KR, Apple SD Gothic Neo, Malgun Gothic, sans-serif;
+}
+
+.activation-container { max-width: 1000px; margin: 0 auto; padding: 24px; }
+.activation-title { display: flex; align-items: center; gap: 14px; margin: 12px 0 24px; }
+.activation-icon { display: grid; width: 46px; height: 46px; place-items: center; border-radius: 12px; background: #e3e9ff; color: #1f3fbd; font-size: 25px; }
+.activation-title h1 { margin: 0; font-size: 28px; font-weight: 850; letter-spacing: -.02em; }
+.activation-title p, .activation-card-header p { margin: 5px 0 0; color: #69748c; font-size: 14px; }
+.activation-card { overflow: hidden; border: 1px solid #dbe3f0; border-radius: 14px; background: white; box-shadow: 0 12px 35px rgba(26, 45, 88, .06); }
+.activation-card-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 21px 24px; border-bottom: 1px solid #e8edf5; }
+.activation-card-header h2, .activation-message h2 { margin: 0; font-size: 17px; font-weight: 800; }
+.activation-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; padding: 24px; }
+.activation-field { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.activation-field.wide { grid-column: 1 / -1; }
+.activation-field label { color: #334155; font-size: 14px; font-weight: 600; line-height: 1.35; }
+.activation-field label span { color: #dc2626; }
+.activation-field input, .activation-field select {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+  background: #fff;
+  color: #111827;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.activation-field input::placeholder { color: #9ca3af; opacity: 1; }
+.activation-field input:focus, .activation-field select:focus { border-color: #a78bfa; box-shadow: 0 0 0 2px #ede9fe; }
+.activation-field small { margin-top: -4px; color: #dc2626; font-size: 12px; }
+.activation-actions { padding: 18px 24px 22px; border-top: 1px solid #e8edf5; }
+.activation-primary, .activation-secondary { min-height: 38px; padding: 0 15px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 750; }
+.activation-primary { border: 1px solid #1f3fbd; background: #1f3fbd; color: white; }
+.activation-primary:hover:not(:disabled) { background: #17349f; }
+.activation-primary:disabled { cursor: not-allowed; border-color: #cbd5e1; background: #cbd5e1; }
+.activation-secondary { border: 1px solid #d7dfeb; background: white; color: #41506b; }
+.activation-secondary:disabled { cursor: wait; opacity: .6; }
+.activation-error { margin: 0 0 12px; color: #b42318; font-size: 13px; }
+.activation-preview-note { margin: 0 0 12px; color: #745b13; font-size: 13px; }
+.activation-success { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; padding: 14px; border: 1px solid #b7e4c7; border-radius: 9px; background: #effaf3; color: #146c43; }
+.activation-success code { display: block; margin-top: 7px; overflow-wrap: anywhere; color: #183d2a; font-size: 13px; }
+.activation-message { padding: 24px; color: #526079; }
+.activation-message p { margin: 8px 0 18px; font-size: 14px; }
+
+@media (max-width: 640px) {
+  .activation-container { padding: 18px 14px; }
+  .activation-fields { grid-template-columns: 1fr; padding: 18px; gap: 16px; }
+  .activation-field.wide { grid-column: auto; }
+  .activation-card-header { align-items: flex-start; padding: 18px; }
+  .activation-card-header p { max-width: 250px; line-height: 1.45; }
+  .activation-success { align-items: flex-start; flex-direction: column; }
+}

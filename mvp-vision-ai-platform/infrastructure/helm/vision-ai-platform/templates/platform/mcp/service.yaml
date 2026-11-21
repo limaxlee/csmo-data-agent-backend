@@ -1,0 +1,17 @@
+{{- if .Values.platform.mcp.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.mcp.fullname" . }}
+  labels:
+    {{- include "vision-ai.mcp.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.platform.mcp.service.type }}
+  ports:
+    - port: {{ .Values.platform.mcp.service.port }}
+      targetPort: {{ .Values.platform.mcp.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "vision-ai.mcp.selectorLabels" . | nindent 4 }}
+{{- end }}

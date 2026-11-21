@@ -1,0 +1,78 @@
+{{- if and .Values.platform.training.enabled .Values.platform.training.debugPod.enabled -}}
+# =============================================================================
+# Training Debug Pod
+# =============================================================================
+# A debugging pod with all training volumes mounted for troubleshooting.
+# Useful for inspecting dataset cache, model cache, and storage issues.
+#
+# Usage:
+#   helm install ... --set platform.training\.debugPod.enabled=true
+#
+# Access:
+#   kubectl exec -it -n training debug-pod -- /bin/sh
+# =============================================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: debug-pod
+  namespace: {{ include "vision-ai.training.namespace" . }}
+  labels:
+    {{- include "vision-ai.training.labels" . | nindent 4 }}
+    app.kubernetes.io/component: debug
+spec:
+  serviceAccountName: {{ include "vision-ai.training.serviceAccountName" . }}
+  {{- with .Values.platform.training.gpu.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: debug
+      image: "{{ .Values.platform.training.debugPod.image }}:{{ .Values.platform.training.debugPod.tag }}"
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "1Gi"
+      volumeMounts:
+        # Dataset cache volume
+        {{- if .Values.platform.training.storage.datasets.enabled }}
+        - name: datasets-cache
+          mountPath: {{ .Values.platform.training.storage.datasets.mountPath }}
+          readOnly: true
+        {{- end }}
+        # Models cache volume
+        {{- if .Values.platform.training.storage.modelsCache.enabled }}
+        - name: models-cache
+          mountPath: {{ .Values.platform.training.storage.modelsCache.mountPath }}
+        {{- end }}
+        # Shared memory for debugging
+        - name: dshm
+          mountPath: /dev/shm
+        # Temp workspace
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    {{- if .Values.platform.training.storage.datasets.enabled }}
+    - name: datasets-cache
+      persistentVolumeClaim:
+        claimName: {{ .Values.platform.training.storage.datasets.pvcName }}
+    {{- end }}
+    {{- if .Values.platform.training.storage.modelsCache.enabled }}
+    - name: models-cache
+      persistentVolumeClaim:
+        claimName: {{ .Values.platform.training.storage.modelsCache.pvcName }}
+    {{- end }}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+    - name: workspace
+      emptyDir:
+        sizeLimit: 10Gi
+  restartPolicy: Never
+{{- end }}
+

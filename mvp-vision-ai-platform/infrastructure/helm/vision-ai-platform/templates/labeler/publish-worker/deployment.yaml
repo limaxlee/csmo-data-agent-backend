@@ -1,0 +1,79 @@
+{{- if and .Values.labeler.enabled .Values.labeler.publishWorker.enabled (ne (include "vision-ai.consolidation.enabled" .) "true") }}
+{{- $imageRepository := default .Values.labeler.backend.image.repository .Values.labeler.publishWorker.image.repository }}
+{{- $imageTag := default .Values.labeler.backend.image.tag .Values.labeler.publishWorker.image.tag }}
+{{- $backendEnv := default (dict) .Values.labeler.backend.env }}
+{{- $workerEnv := default (dict) .Values.labeler.publishWorker.env }}
+{{- $env := mergeOverwrite (deepCopy $backendEnv) $workerEnv }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "labeler") | fromYaml }}
+{{- $cacheWarmupUrl := index $env "PLATFORM_DATASET_CACHE_WARMUP_URL" | default (include "vision-ai.datasetCache.warmupUrl" .) }}
+{{- if $cacheWarmupUrl }}{{- $_ := set $env "PLATFORM_DATASET_CACHE_WARMUP_URL" $cacheWarmupUrl }}{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.labeler.fullname" . }}-publish-worker
+  labels:
+    {{- include "vision-ai.labeler.labels" . | nindent 4 }}
+    app.kubernetes.io/component: publish-worker
+spec:
+  replicas: {{ .Values.labeler.publishWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: publish-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: publish-worker
+    spec:
+      {{- with .Values.labeler.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.labeler.publishWorker.securityContext }}
+      securityContext:
+        {{- toYaml .Values.labeler.publishWorker.securityContext | nindent 8 }}
+      {{- else }}
+      {{- with .Values.labeler.backend.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: publish-worker
+          image: "{{ $imageRepository }}:{{ $imageTag }}"
+          {{- with .Values.labeler.publishWorker.image.pullPolicy }}
+          imagePullPolicy: {{ . }}
+          {{- end }}
+          {{- with .Values.labeler.publishWorker.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.labeler.publishWorker.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- with .Values.labeler.publishWorker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.labeler.publishWorker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.publishWorker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.publishWorker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

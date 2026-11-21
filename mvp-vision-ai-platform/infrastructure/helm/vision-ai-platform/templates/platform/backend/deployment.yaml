@@ -1,0 +1,184 @@
+{{- if .Values.platform.backend.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.backend.fullname" . }}
+  labels:
+    {{- include "vision-ai.backend.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.platform.backend.autoscaling.enabled }}
+  replicas: {{ .Values.platform.backend.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.backend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/platform/backend/configmap.yaml") . | sha256sum }}
+        checksum/training-job-templates: {{ include (print $.Template.BasePath "/platform/training/job-templates-configmap.yaml") . | sha256sum }}
+        {{- if and .Values.platform.training.enabled .Values.platform.training.space.enabled .Values.platform.training.space.credentials.create }}
+        checksum/space-credentials: {{ include (print $.Template.BasePath "/platform/backend/space-credentials-secret.yaml") . | sha256sum }}
+        {{- end }}
+      {{- with .Values.platform.backend.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "vision-ai.backend.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if eq (include "vision-ai.autoLabeling.backendExecution" .) "true" }}
+      terminationGracePeriodSeconds: 180
+      {{- end }}
+      {{- with .Values.platform.backend.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vision-ai.backend.serviceAccountName" . }}
+      securityContext:
+        {{- if eq (include "vision-ai.autoLabeling.backendExecution" .) "true" }}
+        {{- toYaml (mergeOverwrite (dict "fsGroup" 1000) .Values.platform.backend.podSecurityContext) | nindent 8 }}
+        {{- else }}
+        {{- toYaml .Values.platform.backend.podSecurityContext | nindent 8 }}
+        {{- end }}
+      {{- if eq (include "vision-ai.autoLabeling.enabled" .) "true" }}
+      {{- $migrationEnv := include "vision-ai.autoLabeling.platformEnv" (dict "root" . "env" .Values.platform.backend.env) | fromYaml }}
+      {{- $migrationEnv = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $migrationEnv "database" "platform") | fromYaml }}
+      initContainers:
+        - name: inference-schema
+          image: "{{ .Values.platform.backend.image.repository }}:{{ .Values.platform.backend.image.tag | default .Chart.AppVersion }}"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              uv run --no-project python -m app.services.inference_schema upgrade
+              uv run --no-project python /app/scripts/import_capabilities_to_db.py
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" . }}-config
+          env:
+            - name: TZ
+              value: "UTC"
+            {{- include "vision-ai.autoLabeling.platformSecrets" $migrationEnv | nindent 12 }}
+      {{- if eq (include "vision-ai.autoLabeling.backendExecution" .) "true" }}
+        - name: inference-environment
+          securityContext:
+            {{- toYaml .Values.platform.backend.securityContext | nindent 12 }}
+          image: "{{ .Values.platform.backend.image.repository }}:{{ .Values.platform.backend.image.tag | default .Chart.AppVersion }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.services.inference_bootstrap"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" . }}-config
+          env:
+            - name: TZ
+              value: "UTC"
+            {{- include "vision-ai.autoLabeling.platformSecrets" $migrationEnv | nindent 12 }}
+          volumeMounts:
+            - name: inference-cache
+              mountPath: /var/lib/platform/inference-cache
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: backend
+          securityContext:
+            {{- toYaml .Values.platform.backend.securityContext | nindent 12 }}
+          image: "{{ .Values.platform.backend.image.repository }}:{{ .Values.platform.backend.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.platform.backend.image.pullPolicy }}
+          {{- with .Values.platform.backend.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.platform.backend.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" . }}-config
+          {{- $space := .Values.platform.training.space }}
+          {{- $spaceSecretName := "" }}
+          {{- if and .Values.platform.training.enabled $space.enabled }}
+          {{- if $space.credentials.existingSecret }}
+          {{- $spaceSecretName = $space.credentials.existingSecret }}
+          {{- else if $space.credentials.create }}
+          {{- $spaceSecretName = (default (printf "%s-space-credentials" (include "vision-ai.backend.fullname" .)) $space.credentials.secretName) }}
+          {{- end }}
+          {{- end }}
+          {{- $baseEnv := include "vision-ai.autoLabeling.platformEnv" (dict "root" . "env" .Values.platform.backend.env) | fromYaml }}
+          {{- $env := include "vision-ai.redis.applicationEnv" (dict "root" . "env" $baseEnv "database" "platform") | fromYaml }}
+          {{- $refs := dict }}
+          {{- range $key, $value := $env }}
+          {{- if kindIs "map" $value }}
+          {{- $_ := set $refs $key $value }}
+          {{- end }}
+          {{- end }}
+          env:
+            - name: TZ
+              value: "UTC"
+            {{- if or $spaceSecretName $refs }}
+            {{- if $spaceSecretName }}
+            {{- if or (hasKey $refs "SPACE_USERNAME") (hasKey $refs "SPACE_PASSWORD") }}
+            {{- fail "Use training.space.credentials for SPACE_USERNAME/SPACE_PASSWORD; duplicate env references are not allowed" }}
+            {{- end }}
+            - name: SPACE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $spaceSecretName | quote }}
+                  key: {{ $space.credentials.usernameKey | default "username" | quote }}
+            - name: SPACE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $spaceSecretName | quote }}
+                  key: {{ $space.credentials.passwordKey | default "password" | quote }}
+            {{- end }}
+            {{- range $key, $value := $refs }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.platform.backend.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.platform.backend.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.platform.backend.resources | nindent 12 }}
+          {{- if or .Values.platform.backend.persistence.enabled (eq (include "vision-ai.autoLabeling.backendExecution" .) "true") }}
+          volumeMounts:
+            {{- if eq (include "vision-ai.autoLabeling.backendExecution" .) "true" }}
+            - name: inference-cache
+              mountPath: /var/lib/platform/inference-cache
+            {{- end }}
+            {{- if .Values.platform.backend.persistence.enabled }}
+            - name: data
+              mountPath: /app/data
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.platform.backend.persistence.enabled (eq (include "vision-ai.autoLabeling.backendExecution" .) "true") }}
+      volumes:
+        {{- if eq (include "vision-ai.autoLabeling.backendExecution" .) "true" }}
+        - name: inference-cache
+          persistentVolumeClaim:
+            claimName: {{ include "vision-ai.backend.fullname" . }}-inference-cache
+        {{- end }}
+        {{- if .Values.platform.backend.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "vision-ai.backend.fullname" . }}-data
+        {{- end }}
+      {{- end }}
+      {{- with .Values.platform.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.backend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

@@ -1,0 +1,36 @@
+{{- if .Values.diceBot.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vision-ai.diceBot.fullname" . }}-config
+  labels:
+    {{- include "vision-ai.diceBot.labels" . | nindent 4 }}
+data:
+  ENVIRONMENT: {{ .Values.diceBot.environment | quote }}
+  LOG_LEVEL: {{ .Values.diceBot.logLevel | quote }}
+  BASE_URL: {{ .Values.diceBot.baseUrl | quote }}
+
+  # Upstream services URLs
+  {{- $activationBaseUrl := .Values.diceBot.config.activationBaseUrl }}
+  {{- if and (not $activationBaseUrl) .Values.labeler.enabled }}
+  {{- $activationBaseUrl = printf "http://%s-backend:%d/api/v1/activation" (include "vision-ai.labeler.fullname" .) (.Values.labeler.backend.port | int) }}
+  {{- end }}
+  ACTIVATION_BASE_URL: {{ $activationBaseUrl | quote }}
+
+  {{- $trainerServiceBaseUrl := .Values.diceBot.config.trainerServiceBaseUrl }}
+  {{- if and (not $trainerServiceBaseUrl) .Values.labeler.enabled }}
+  {{- $trainerServiceBaseUrl = printf "http://%s-backend:%d/api/v1/trainer" (include "vision-ai.labeler.fullname" .) (.Values.labeler.backend.port | int) }}
+  {{- end }}
+  TRAINER_SERVICE_BASE_URL: {{ $trainerServiceBaseUrl | quote }}
+
+  # Messenger (message send)
+  MESSENGER_BASE_URL: {{ .Values.diceBot.config.messengerBaseUrl | quote }}
+  MESSENGER_SYSTEM_ID: {{ .Values.diceBot.config.messengerSystemId | quote }}
+  MESSENGER_ACCESS_TOKEN: {{ .Values.diceBot.config.messengerAccessToken | quote }}
+
+  # Additional environment variables
+  {{- range $key, $value := .Values.diceBot.config.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}
+

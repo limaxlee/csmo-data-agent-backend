@@ -1,0 +1,164 @@
+{{- if and (ne (include "vision-ai.autoLabeling.backendExecution" .) "true") (eq (include "vision-ai.consolidation.enabled" .) "true") .Values.labeler.enabled (or .Values.labeler.inferenceWorkers.enabled (eq (include "vision-ai.autoLabeling.enabled" .) "true")) }}
+{{- $root := . }}
+{{- $workers := .Values.labeler.inferenceWorkers }}
+{{- range $field := list "nodeSelector" "tolerations" "affinity" }}
+{{- if and (index $workers $field) (ne (toJson (index $workers $field)) (toJson (index $root.Values.workloadConsolidation.autoLabeling $field))) }}
+{{- fail (printf "Move labeler.inferenceWorkers.%s to workloadConsolidation.autoLabeling.%s for consolidation" $field $field) }}
+{{- end }}
+{{- end }}
+{{- range $ctx := list $root.Values.labeler.backend.securityContext $root.Values.platform.backend.podSecurityContext }}
+{{- range $field := list "fsGroup" "fsGroupChangePolicy" "supplementalGroups" "sysctls" }}
+{{- if and (hasKey $ctx $field) (ne (toJson (index $ctx $field)) (toJson (index $root.Values.workloadConsolidation.autoLabeling.podSecurityContext $field))) }}
+{{- fail (printf "Consolidated auto-labeling pod security field %s must match source pods" $field) }}
+{{- end }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-auto-labeling" .Release.Name | trunc 63 | trimSuffix "-" }}
+  labels:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: auto-labeling
+spec:
+  replicas: {{ .Values.workloadConsolidation.autoLabeling.replicas }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: auto-labeling
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print .Template.BasePath "/platform/backend/configmap.yaml") . | sha256sum }}
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: auto-labeling
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.workloadConsolidation.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.workloadConsolidation.autoLabeling.podSecurityContext | nindent 8 }}
+      imagePullSecrets:
+        {{- toYaml (concat .Values.labeler.imagePullSecrets .Values.platform.backend.imagePullSecrets | uniq) | nindent 8 }}
+      initContainers:
+{{- $baseEnv := include "vision-ai.autoLabeling.labelerEnv" (dict "root" . "env" .Values.labeler.backend.env) | fromYaml }}
+{{- $env := mergeOverwrite $baseEnv $workers.env }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "labeler") | fromYaml }}
+        - name: labeler-inference-schema
+          image: "{{ $root.Values.labeler.backend.image.repository }}:{{ $root.Values.labeler.backend.image.tag }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.inference.schema", "wait"]
+          securityContext:
+            {{- toYaml (omit $root.Values.labeler.backend.securityContext "fsGroup" "fsGroupChangePolicy" "supplementalGroups" "sysctls") | nindent 12 }}
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+{{- if eq (include "vision-ai.autoLabeling.enabled" .) "true" }}
+{{- $env := include "vision-ai.autoLabeling.platformEnv" (dict "root" . "env" .Values.platform.backend.env) | fromYaml }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "platform") | fromYaml }}
+        - name: platform-inference-schema
+          image: "{{ $root.Values.platform.backend.image.repository }}:{{ $root.Values.platform.backend.image.tag | default $root.Chart.AppVersion }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.services.inference_schema", "wait"]
+          securityContext:
+            {{- toYaml (omit $root.Values.platform.backend.podSecurityContext "fsGroup" "fsGroupChangePolicy" "supplementalGroups" "sysctls") | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" $root }}-config
+          env:
+            {{- include "vision-ai.autoLabeling.platformSecrets" $env | nindent 12 }}
+        - name: platform-inference-environment
+          image: "{{ $root.Values.platform.backend.image.repository }}:{{ $root.Values.platform.backend.image.tag | default $root.Chart.AppVersion }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.services.inference_bootstrap"]
+          securityContext:
+            {{- toYaml (omit $root.Values.platform.backend.podSecurityContext "fsGroup" "fsGroupChangePolicy" "supplementalGroups" "sysctls") | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" $root }}-config
+          env:
+            {{- include "vision-ai.autoLabeling.platformSecrets" $env | nindent 12 }}
+          volumeMounts:
+            - name: inference-cache
+              mountPath: /var/lib/platform/inference-cache
+{{- end }}
+      containers:
+{{- $baseEnv := include "vision-ai.autoLabeling.labelerEnv" (dict "root" . "env" .Values.labeler.backend.env) | fromYaml }}
+{{- $env := mergeOverwrite $baseEnv $workers.env }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "labeler") | fromYaml }}
+{{- range $phase := list "control" "prepare" "save" }}
+{{- if ne (int (index $workers.replicas $phase)) (int $root.Values.workloadConsolidation.autoLabeling.replicas) }}
+{{- fail "Consolidated Labeler inference replicas must match workloadConsolidation.autoLabeling.replicas" }}
+{{- end }}
+{{- end }}
+{{- range $phase := list "dispatcher" "worker" }}
+{{- if and (eq $phase "dispatcher") (ne (int (index $workers.replicas $phase)) (int $root.Values.workloadConsolidation.autoLabeling.replicas)) }}
+{{- fail "Consolidated Labeler inference replicas must match workloadConsolidation.autoLabeling.replicas" }}
+{{- end }}
+        - name: labeler-{{ $phase }}
+          image: "{{ $root.Values.labeler.backend.image.repository }}:{{ $root.Values.labeler.backend.image.tag }}"
+          command: ["uv", "run", "--no-project", "--no-sync", "python", "-m"]
+          {{- if eq $phase "dispatcher" }}
+          args: ["app.inference.dispatcher"]
+          {{- else }}
+          args: ["app.inference.rq_worker", "control", "prepare", "save"]
+          {{- end }}
+          securityContext:
+            {{- toYaml (omit $root.Values.labeler.backend.securityContext "fsGroup" "fsGroupChangePolicy" "supplementalGroups" "sysctls") | nindent 12 }}
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- if eq $phase "worker" }}
+            {{- toYaml $root.Values.workloadConsolidation.autoLabeling.labelerWorkerResources | nindent 12 }}
+            {{- else }}
+            {{- toYaml $workers.resources | nindent 12 }}
+            {{- end }}
+{{- end }}
+{{- if eq (include "vision-ai.autoLabeling.enabled" .) "true" }}
+{{- $env := include "vision-ai.autoLabeling.platformEnv" (dict "root" . "env" .Values.platform.backend.env) | fromYaml }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "platform") | fromYaml }}
+{{- range $phase := list "dispatcher" "worker" }}
+        - name: platform-{{ $phase }}
+          image: "{{ $root.Values.platform.backend.image.repository }}:{{ $root.Values.platform.backend.image.tag | default $root.Chart.AppVersion }}"
+          command: ["uv", "run", "--no-project", "python", "-m"]
+          {{- if eq $phase "dispatcher" }}
+          args: ["app.services.gpu_dispatcher"]
+          {{- else }}
+          args: ["app.services.inference_rq_worker", "prepare", "gpu"]
+          {{- end }}
+          securityContext:
+            {{- toYaml (omit $root.Values.platform.backend.podSecurityContext "fsGroup" "fsGroupChangePolicy" "supplementalGroups" "sysctls") | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" $root }}-config
+          env:
+            {{- include "vision-ai.autoLabeling.platformSecrets" $env | nindent 12 }}
+          resources:
+            {{- if eq $phase "worker" }}
+            {{- toYaml $root.Values.workloadConsolidation.autoLabeling.platformWorkerResources | nindent 12 }}
+            {{- else }}
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+            {{- end }}
+          volumeMounts:
+            - name: inference-cache
+              mountPath: /var/lib/platform/inference-cache
+{{- end }}
+      volumes:
+        - name: inference-cache
+          persistentVolumeClaim:
+            claimName: {{ include "vision-ai.backend.fullname" . }}-inference-cache
+{{- end }}
+      {{- with .Values.workloadConsolidation.autoLabeling.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workloadConsolidation.autoLabeling.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.workloadConsolidation.autoLabeling.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

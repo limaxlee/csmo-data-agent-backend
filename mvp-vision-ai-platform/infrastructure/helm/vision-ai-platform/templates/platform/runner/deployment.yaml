@@ -1,0 +1,143 @@
+{{- if .Values.platform.runner.enabled -}}
+{{- $runnerHome := .Values.platform.runner.config.dataDir -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "vision-ai.runner.fullname" . }}
+  labels:
+    {{- include "vision-ai.runner.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "vision-ai.runner.fullname" . }}
+  replicas: {{ .Values.platform.runner.replicaCount }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "vision-ai.runner.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include "vision-ai.runner.configToml" . | sha256sum }}
+      {{- with .Values.platform.runner.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "vision-ai.runner.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.platform.runner.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.runner.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- if .Values.platform.runner.hostPID }}
+      hostPID: true
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.platform.runner.podSecurityContext | nindent 8 }}
+      containers:
+        - name: runner
+          securityContext:
+            {{- toYaml .Values.platform.runner.securityContext | nindent 12 }}
+          image: "{{ .Values.platform.runner.image.repository }}:{{ .Values.platform.runner.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.platform.runner.image.pullPolicy }}
+          {{- with .Values.platform.runner.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- with $.Values.platform.runner.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- else }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              config_dir="$DICE_DATA_DIR/config"
+              mkdir -p "$config_dir"
+              if [ ! -e "$config_dir/config.toml" ]; then
+                (umask 077; printf '%s\n' "$DICE_RUNNER_INITIAL_CONFIG" > "$config_dir/config.toml")
+              fi
+              exec /usr/bin/tini -- /usr/local/bin/docker-entrypoint.sh "$@"
+            - runner
+            {{- with .Values.platform.runner.args }}
+            {{- toYaml . | nindent 12 }}
+            {{- else }}
+            - --config
+            - {{ printf "%s/config/config.toml" $runnerHome | quote }}
+            {{- end }}
+          {{- end }}
+          ports:
+            # Unified single-port bind (inference + management + metrics +
+            # console). See runner config unified_address.
+            - name: inference
+              containerPort: {{ .Values.platform.runner.service.inferenceTargetPort }}
+              protocol: TCP
+          env:
+            - name: TZ
+              value: "UTC"
+            - name: DICE_DATA_DIR
+              value: {{ $runnerHome | quote }}
+            - name: DICE_RUNNER_INITIAL_CONFIG
+              value: |
+                {{- include "vision-ai.runner.configToml" . | nindent 16 }}
+            {{- if eq (include "vision-ai.autoLabeling.enabled" .) "true" }}
+            - name: DICE_MANAGED_ATTEMPT_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- include "vision-ai.autoLabeling.managedKeyRef" . | nindent 18 }}
+            {{- end }}
+            {{- with .Values.platform.runner.env }}
+            {{- range $key, $value := . }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.platform.runner.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.platform.runner.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.platform.runner.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.platform.runner.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.platform.runner.resources | nindent 12 }}
+          volumeMounts:
+            - name: runner-data
+              mountPath: {{ $runnerHome | quote }}
+            {{- with .Values.platform.runner.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: runner-data
+          {{- if .Values.platform.runner.storage.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "vision-ai.runner.dataPvcName" . }}
+          {{- else if .Values.platform.runner.storage.sizeLimit }}
+          emptyDir:
+            sizeLimit: {{ .Values.platform.runner.storage.sizeLimit | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- with .Values.platform.runner.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.platform.runner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.runner.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.runner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

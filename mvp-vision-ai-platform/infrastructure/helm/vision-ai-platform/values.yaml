@@ -1,0 +1,2118 @@
+# Vision AI Platform - Unified Helm Chart Values
+# This chart deploys backend, frontend, and training infrastructure together.
+# Note: web and web-auth are now unified into web-auth (Next.js + Nextra).
+
+# Global settings
+# Defaults to <release>-platform-* resource names (e.g. dice-platform-backend).
+nameOverride: ""
+fullnameOverride: ""
+
+# Release-local Redis for DICE caches and background-job queues.
+# Opt in in two steps: provision first, then switch applications after migration.
+redis:
+  enabled: false
+  connectApplications: false
+  image:
+    repository: docker-remote.bart.sec.samsung.net/redis
+    tag: "7.4.3"
+    pullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: regcred
+  # Keep queue data durable; do not use cache eviction policies for RQ queues.
+  maxmemory: "512mb"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  persistence:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""  # Use nfs-csi for the current cluster.
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+  # No password/TLS in this initial single-instance deployment. Restrict ingress
+  # to this Helm release in this namespace; requires NetworkPolicy-capable CNI.
+  networkPolicy:
+    enabled: true
+  databases:
+    platform: 0
+    labeler: 1
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Central ADFS login service for the web entry point.
+# The dice namespace must contain vision-ai-secrets with the web-auth keys.
+webAuth:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: dice-docker-local.bart.sec.samsung.net/dice-web-auth
+    pullPolicy: IfNotPresent
+    tag: "latest"
+
+  imagePullSecrets:
+    - name: regcred
+
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+
+  podAnnotations: {}
+
+  podSecurityContext:
+    fsGroup: 1001
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+  service:
+    type: ClusterIP
+    port: 3020
+    targetPort: 3020
+
+  ingress:
+    enabled: false
+    className: "nginx"
+    annotations: {}
+    hosts:
+      - host: vision-ai.local
+        paths:
+          - path: /auth
+            pathType: Prefix
+    tls: []
+
+  resources:
+    limits:
+      cpu: 300m
+      memory: 384Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+  livenessProbe:
+    httpGet:
+      path: /auth/api/auth/session
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /auth/api/auth/session
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  env:
+    NEXT_PUBLIC_BASE_PATH: "/"
+    NEXT_PUBLIC_AUTH_DEFAULT_CALLBACK_URL: "/"
+    NEXTAUTH_URL: "https://dice.gtrai.sec.samsung.net/api/auth"
+    AUTH_DEFAULT_CALLBACK_URL: "/"
+    AUTH_ALLOWED_CALLBACK_PREFIXES: "/,/platform,/labeler,/dashboard,/ko,/en,/runner,/settings"
+    # Runtime ADFS simulator. It remains disabled unless an explicit login ID
+    # allowlist is also configured; admin access requires a separate opt-in.
+    DEV_LOGIN_ENABLED: "false"
+    DEV_LOGIN_ALLOWED_IDS: ""
+    DEV_LOGIN_ALLOW_ADMIN: "false"
+    # Empty user-service URL resolves to this release's user-service in ConfigMap.
+    USER_SERVICE_API_URL: ""
+    DASHBOARD_URL: "/dashboard"
+    # Activation API uses the shared PostgreSQL service and existing activation DB.
+    ACTIVATION_DB_HOST: ""
+    ACTIVATION_DB_PORT: "5432"
+    ACTIVATION_DB_NAME: "activation"
+    ACTIVATION_DB_SSL: "false"
+    # ADFS v4.0 OIDC 설정 (Samsung SSO)
+    ADFS_CLIENT_ID: "dice-web-adfs"
+    ADFS_ISSUER: "https://sts.secsso.net/adfs"
+    ADFS_ISSUER_INTERNAL: "https://sts.secsso.net/adfs"
+    # web-auth 가 발급하는 service JWT 서명 키.
+    # platform/labeler 백엔드의 SERVICE_JWT_SECRET 과 반드시 동일한 값이어야 함.
+    SERVICE_JWT_SECRET: "dev-service-jwt-secret"
+
+    # Release distribution (runner-releases, runner-envs, legacy-trainer-releases)
+    # — manifest + presigned-URL routes, independent of platform-backend/trainer-backend.
+    # Role check reads the service JWT's roles claim directly (no DB).
+    S3_ENDPOINT: "http://localhost:9000"
+    S3_ENDPOINT_PUBLIC: ""
+    S3_ACCESS_KEY: "minioadmin"
+    S3_SECRET_KEY: "minioadmin"
+    S3_BUCKET: "vision-platform-dev"
+    S3_REGION: "us-east-1"
+    RUNNER_RELEASE_STORAGE_PREFIX: "runner-releases/windows"
+    RUNNER_ENV_STORAGE_PREFIX: "runner-envs/linux"
+    RUNNER_ENV_PRESIGN_EXPIRE_SECONDS: "3600"
+
+  secretEnv:
+    - name: NEXTAUTH_SECRET
+      secretName: vision-ai-secrets
+      secretKey: web-auth-nextauth-secret
+    - name: ADFS_CLIENT_SECRET
+      secretName: vision-ai-secrets
+      secretKey: web-auth-adfs-client-secret
+    - name: ACTIVATION_DB_USER
+      secretName: vision-ai-secrets
+      secretKey: postgres-user
+    - name: ACTIVATION_DB_PASSWORD
+      secretName: vision-ai-secrets
+      secretKey: postgres-password
+
+  # CA 인증서 마운트 (선택 - 사내 CA 사용 시)
+  # kubectl create secret generic adfs-ca-cert --from-file=ca.crt=/path/to/ca.crt -n dice
+  extraVolumes: []
+  #   - name: ca-certs
+  #     secret:
+  #       secretName: adfs-ca-cert
+  #       defaultMode: 420  # 0644
+
+  extraVolumeMounts: []
+  #   - name: ca-certs
+  #     mountPath: /etc/ssl/certs/samsung-ca.crt
+  #     subPath: ca.crt
+  #     readOnly: true
+
+  # CA 인증서 환경변수 (extraVolumeMounts 사용 시 활성화)
+  # env:
+  #   NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/samsung-ca.crt"
+
+# Standalone admin Dashboard. External DICE routing is managed by the Istio
+# VirtualService; this chart owns the workloads and their ClusterIP Services.
+dashboard:
+  enabled: false
+  frontend:
+    replicaCount: 1
+    image:
+      repository: secret-repo
+      pullPolicy: IfNotPresent
+      tag: "latest"
+    imagePullSecrets:
+      - name: regcred
+    service:
+      type: ClusterIP
+      port: 3021
+      targetPort: 3021
+    livenessProbe:
+      httpGet: { path: /dashboard, port: http }
+      initialDelaySeconds: 20
+      periodSeconds: 20
+    readinessProbe:
+      httpGet: { path: /dashboard, port: http }
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+    env: {}
+    nodeSelector: {}
+  backend:
+    replicaCount: 1
+    image:
+      repository: secret-repo
+      pullPolicy: IfNotPresent
+      tag: "latest"
+    imagePullSecrets:
+      - name: regcred
+    service:
+      type: ClusterIP
+      port: 8021
+      targetPort: 8021
+    env:
+      DASHBOARD_ENV: production
+      DASHBOARD_LOG_LEVEL: INFO
+      DASHBOARD_USER_SERVICE_API_URL: ""
+      DASHBOARD_PROMETHEUS_TIMEOUT_SECONDS: "15"
+      # Replace with a valueFrom.secretKeyRef when the model endpoint requires a key:
+      # DASHBOARD_AGENT_LLM_API_KEY:
+      #   valueFrom:
+      #     secretKeyRef:
+      #       name: dashboard-agent
+      #       key: api-key
+      DASHBOARD_AGENT_LLM_API_KEY: ""
+      DASHBOARD_AGENT_LLM_MODEL: "qwen/qwen3.8-flash-next"
+      DASHBOARD_AGENT_LLM_TIMEOUT_SECONDS: "60"
+      DASHBOARD_AGENT_MCP_TIMEOUT_SECONDS: "30"
+      DASHBOARD_AGENT_MAX_TOOL_CALL_ROUNDS: "5"
+      DASHBOARD_AGENT_MAX_TOKENS: "2048"
+      DASHBOARD_AGENT_MAX_EXPORT_ROWS: "10000"
+      DASHBOARD_MCP_URL: ""
+    livenessProbe:
+      httpGet: { path: /health, port: http }
+      initialDelaySeconds: 10
+      periodSeconds: 20
+    readinessProbe:
+      httpGet: { path: /readyz, port: http }
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
+    nodeSelector: {}
+  # Optional nginx ingress for installations that use an Ingress controller.
+  # DICE's external /dashboard route is owned by its Istio VirtualService.
+  ingress:
+    enabled: false
+    className: "nginx"
+    annotations: {}
+    hosts:
+      - host: vision-ai
+        paths:
+          - path: /dashboard
+            pathType: Prefix
+    tls: []
+
+# DICE Docs (Nextra v4, i18n ko/en) — served at /docs via the dice-vs VirtualService.
+docs:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: dice-docker-local.bart.sec.samsung.net/dice-docs
+    pullPolicy: IfNotPresent
+    tag: "latest"
+
+  imagePullSecrets:
+    - name: regcred
+
+  service:
+    type: ClusterIP
+    port: 3030
+    targetPort: 3030
+
+  livenessProbe:
+    httpGet:
+      path: /docs/ko
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /docs/ko
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  resources:
+    limits:
+      cpu: 300m
+      memory: 384Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Platform application values.
+platform:
+  # =============================================================================
+  # MCP Server (chat-only training via each user's own Claude)
+  # Remote HTTP transport, no LLM. Each request carries the caller's PAT in the
+  # Authorization header, so actions run as that user. No PAT is baked in.
+  # =============================================================================
+  mcp:
+    enabled: true
+    replicaCount: 1
+    image:
+      repository: dice-docker-local.bart.sec.samsung.net/dice-mcp-server
+      pullPolicy: IfNotPresent
+      tag: "latest"
+    imagePullSecrets:
+      - name: regcred
+    service:
+      type: ClusterIP
+      port: 8080
+      targetPort: 8080
+    # HTTP base path where the MCP endpoint is mounted; MUST match the ingress
+    # path below (ingress forwards without rewrite).
+    basePath: /platform/mcp
+    # In-cluster connection to the platform backend (users' PAT arrives per-request).
+    env:
+      DICE_API_URL: "" # Empty = release-local backend
+      DICE_API_PREFIX: "/platform/api/v1"
+      NO_PROXY: "localhost,127.0.0.1,.svc,.svc.cluster.local,.gtrai.sec.samsung.net"
+    # Ingress off by default (like other components); enable + set the real host
+    # in the per-environment override (mirror platform.backend.ingress).
+    ingress:
+      enabled: true
+      className: "nginx"
+      annotations: {}
+      hosts:
+        - host: mcp.vision-ai.local
+          paths:
+            - path: /platform/mcp
+              pathType: Prefix
+      tls: []
+    livenessProbe:
+      httpGet: { path: /health, port: http }
+      initialDelaySeconds: 10
+      periodSeconds: 20
+    readinessProbe:
+      httpGet: { path: /health, port: http }
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
+    nodeSelector: {}
+    
+  # =============================================================================
+  # Dashboard MCP Server (read-only dashboard via each admin's own Claude)
+  # Remote HTTP transport, no LLM. Each request carries the caller's PAT in the
+  # Authorization header, so actions run as that admin (dashboard is admin-only).
+  # No PAT is baked in.
+  # =============================================================================
+  dashboardMcp:
+    enabled: true
+    replicaCount: 1
+    image:
+      repository: dice-docker-local.bart.sec.samsung.net/dice-dashboard-mcp-server
+      pullPolicy: IfNotPresent
+      tag: "latest"
+    imagePullSecrets:
+      - name: regcred
+    service:
+      type: ClusterIP
+      port: 8080
+      targetPort: 8080
+    # HTTP base path where the MCP endpoint is mounted. Any external gateway
+    # route must preserve this path; creating the Service does not expose it.
+    basePath: /mcp/dashboard
+    # In-cluster connection to the platform backend (admins' PAT arrives per-request).
+    env:
+      DICE_API_URL: "" # Empty = release-local backend
+      DICE_API_PREFIX: "/platform/api/v1"
+      DICE_USER_API_URL: "http://dice-user-service.dice.svc.cluster.local:8003/user/api/v1"
+      DICE_LABELER_API_URL: ""
+      DICE_ACTIVATION_API_URL: ""
+      NO_PROXY: "localhost,127.0.0.1,.svc,.svc.cluster.local,.gtrai.sec.samsung.net"
+    # Opt-in only for clusters with an Ingress controller. DICE uses Istio;
+    # external VirtualService routes are managed separately from this chart.
+    # Keep the option for other installations, but do not create an unused
+    # nginx Ingress (and a permanently Progressing Argo resource) by default.
+    ingress:
+      enabled: false
+      className: "nginx"
+      annotations: {}
+      hosts:
+        - host: dice.gtrai.sec.samsung.net
+          paths:
+            - path: /mcp/dashboard
+              pathType: Prefix
+      tls: []
+    livenessProbe:
+      httpGet: { path: /health, port: http }
+      initialDelaySeconds: 10
+      periodSeconds: 20
+    readinessProbe:
+      httpGet: { path: /health, port: http }
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
+    nodeSelector: {}
+
+  # =============================================================================
+  # Backend Configuration (FastAPI)
+  # =============================================================================
+  backend:
+    enabled: true
+    replicaCount: 1
+
+    image:
+      repository: dice-platform-backend
+      pullPolicy: IfNotPresent
+      tag: "latest"
+
+    # Override container command and args
+    # Example:
+    #   command: ["python", "-m", "uvicorn"]
+    #   args: ["app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: []
+    args: []
+
+    imagePullSecrets: []
+
+    serviceAccount:
+      create: true
+      annotations: {}
+      name: ""
+
+    # RBAC for Backend to manage training jobs in training namespace
+    # Required when TRAINING_MODE=kubernetes
+    rbac:
+      create: true
+
+    podAnnotations: {}
+    podSecurityContext: {}
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+
+    service:
+      type: ClusterIP
+      port: 8000
+      targetPort: 8000
+
+    ingress:
+      enabled: false
+      className: "nginx"
+      annotations: {}
+      hosts:
+        - host: api.vision-ai.local
+          paths:
+            - path: /
+              pathType: Prefix
+      tls: []
+
+    resources:
+      limits:
+        cpu: 2000m
+        memory: 2Gi
+      requests:
+        cpu: 1000m
+        memory: 1Gi
+
+    autoscaling:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 80
+      targetMemoryUtilizationPercentage: 80
+
+    nodeSelector: {}
+    tolerations: []
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values:
+                    - "node1"
+
+    # Environment variables
+    env:
+      # LLM Provider
+      LLM_PROVIDER: "openai"
+      OPENAI_API_KEY: "your-openai-api-key"
+      OPENAI_BASE_URL: "https://api.openai.com/v1"
+      LLM_MODEL: "gpt-4o-mini"
+      # Dashboard Chat Agent (MCP remains read-only and receives the caller's JWT).
+      DASHBOARD_AGENT_LLM_API_KEY: ""
+      DASHBOARD_AGENT_LLM_MODEL: "qwen/qwen3.8-flash-next"
+      DASHBOARD_MCP_URL: "" # Empty = release-local dashboard MCP
+      PROMETHEUS_TIMEOUT_SECONDS: "15"
+
+      # Database / Cache
+      DATABASE_URL: "postgresql://admin:devpass@localhost:5434/platform"
+      USER_DATABASE_URL: "postgresql://admin:devpass@localhost:5434/users"
+      USER_SERVICE_API_URL: "http://dice-user-service.dice.svc.cluster.local:8003"
+      REDIS_URL: "redis://localhost:6380/0"
+
+      # API / App
+      BACKEND_PORT: "8000"
+      API_V1_PREFIX: "/platform/api/v1"
+      API_BASE_URL: "" # Empty = backend FQDN for training callbacks
+      CORS_ORIGINS: "http://localhost:3000,http://localhost:3010,http://localhost:5173,http://localhost:8080"
+      FRONTEND_URL: "http://localhost:3000/platform"
+
+      # Embedded diagnostic agent calls the backend's in-process-compatible
+      # API alias over loopback; these do not create another service.
+      DICE_API_URL: "http://127.0.0.1:8000"
+      DICE_API_PREFIX: "/api/v1"
+
+      # Training
+      TRAINING_MODE: "subprocess"
+      TRAINING_DIAGNOSTICS_ENABLED: "false"
+      # Cluster API pods own these queues; host development defaults stay disabled.
+      SPLIT_WORKER_ENABLED: "true"
+      TRAINING_DATA_INPUT_WORKER_ENABLED: "true"
+      # Optional inference-only gateway service credential. Supply the key via
+      # env.DICE_INFERENCE_SERVICE_KEY.valueFrom.secretKeyRef, never plaintext.
+      # Both models use this URL/key; verified requester headers are run-local.
+      DICE_INFERENCE_GATEWAY_URL: ""
+      DICE_JEV_ENABLED: "false"
+      DICE_JEV_MODEL: "jev/jev-9b"
+      # Requires complete legacy export/register, migration 20261006_1100 and durable Redis.
+      # Log and diagnostic activity streams are always enabled; no legacy DB fallback.
+      # Never use an allkeys-lru cache instance for acknowledged logs.
+      ACTIVITY_REDIS_URL: ""
+      ACTIVITY_STREAM_MAX_BYTES: "16777216"
+      ACTIVITY_STREAM_ARCHIVE_BYTES: "1048576"
+      ACTIVITY_STREAM_RECEIPT_SECONDS: "604800"
+      ACTIVITY_ARCHIVE_RETENTION_DAYS: "0"
+      AGENT_EXECUTION_MODE: "embedded"
+      AGENT_MAX_CONCURRENCY: "1"
+      USE_UV: "false"
+
+      # Storage - Unified single bucket
+      S3_BUCKET: "vision-platform-dev"
+      S3_ENDPOINT: "http://localhost:9000"
+      S3_ENDPOINT_PUBLIC: ""
+      S3_ACCESS_KEY: "minioadmin"
+      S3_SECRET_KEY: "minioadmin"
+      S3_REGION: "us-east-1"
+      S3_USE_SSL: "false"
+      JWT_SECRET: "dev-jwt-secret"
+      JWT_ALGORITHM: "HS256"
+      ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+      REFRESH_TOKEN_EXPIRE_DAYS: "7"
+      SERVICE_JWT_SECRET: "dev-service-jwt-secret"
+
+      # Labeler Integration
+      LABELER_API_URL: ""
+
+      # Dice Bot Backend (training completion notifications)
+      # Format: scheme + host + /api/v1/dice-bot
+      BOT_BACKEND_URL: "" # Empty = release-local notification bot
+
+      # Image Tools OCR: migrated models route to DICE Runner (same K8s namespace as backend)
+      DICE_RUNNER_BASE_URL: "" # Empty = release-local runner
+      # Optional debug override for local / external debug (leave empty in cluster)
+      # DICE_RUNNER_DEBUG_BASE_URL: ""
+
+      # Legacy TorchServe pods (fallback for models not migrated to DICE Runner)
+      PADDLEOCR_SERVICE_BASE_URL: "http://{pod}"
+      PADDLEOCR_INFERENCE_TIMEOUT_SECONDS: "3600"
+      # Optional per-pod overrides for local / external debug (leave empty in cluster)
+      # PADDLEOCR_V5_EN: ""
+      # PADDLEOCR_V5_KR: ""
+      # PADDLEOCR_VL_v1.6: ""
+
+    # Secret environment variables (reference to external secret)
+    secretEnv:
+      - name: OPENAI_API_KEY
+        secretName: vision-ai-secrets
+        secretKey: openai-api-key
+      - name: ANTHROPIC_API_KEY
+        secretName: vision-ai-secrets
+        secretKey: anthropic-api-key
+      - name: GOOGLE_API_KEY
+        secretName: vision-ai-secrets
+        secretKey: google-api-key
+      - name: JWT_SECRET
+        secretName: vision-ai-secrets
+        secretKey: jwt-secret
+
+    # Probes
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: http
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+    # General-purpose /app/data volume (optional - prefer S3)
+    persistence:
+      enabled: false
+      storageClass: ""
+      size: 10Gi
+      accessModes:
+        - ReadWriteOnce
+
+  # =============================================================================
+  # Frontend Configuration (static Next.js export served by nginx)
+  # =============================================================================
+  frontend:
+    enabled: true
+    replicaCount: 2
+
+    image:
+      repository: dice-platform-frontend
+      pullPolicy: IfNotPresent
+      tag: "latest"
+
+    # Override container command and args
+    # Example:
+    #   command: ["nginx"]
+    #   args: ["-g", "daemon off;"]
+    command: []
+    args: []
+
+    imagePullSecrets: []
+
+    serviceAccount:
+      create: true
+      annotations: {}
+      name: ""
+
+    podAnnotations: {}
+
+    podSecurityContext:
+      fsGroup: 101
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 101
+      runAsGroup: 101
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+
+    service:
+      type: ClusterIP
+      port: 3000
+      targetPort: 3000
+
+    ingress:
+      enabled: true
+      className: "nginx"
+      annotations:
+        nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+      hosts:
+        - host: vision-ai.local
+          paths:
+            - path: /platform
+              pathType: Prefix
+      tls: []
+
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: http
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+    # Public values are baked into the static frontend image at build time by CI.
+    # They remain here only as chart-visible defaults; nginx does not read them at runtime.
+    env:
+      # Backend API
+      NEXT_PUBLIC_API_URL: "/platform/api/v1"
+      NEXT_PUBLIC_USER_API_URL: "/user/api/v1"
+      NEXT_PUBLIC_LABELER_API_URL: "/labeler/api/v1"
+      NEXT_PUBLIC_LABELER_FRONTEND_URL: "/labeler"
+      NEXT_PUBLIC_BASE_PATH: "/platform"
+      NEXT_PUBLIC_HOME_URL: "/"
+      NEXT_PUBLIC_LABELER_URL: "/labeler"
+      NEXT_PUBLIC_PLATFORM_URL: "/platform"
+      NEXT_PUBLIC_RUNNER_URL: "/runner"
+      NEXT_PUBLIC_DOCS_URL: "/docs/ko/guide/overview"
+      NEXT_PUBLIC_ACTIVATION_URL: "/activation"
+      NEXT_PUBLIC_DOWNLOADS_URL: "/downloads"
+
+  # =============================================================================
+  # Runner Configuration (test GPU inference/runtime instance)
+  # =============================================================================
+  runner:
+    enabled: true
+    # Runner owns durable state under dataDir. Keep this at 1 so a
+    # StatefulSet update stops the old pod before the replacement touches the
+    # same PVC-backed models/envs/logs tree.
+    replicaCount: 1
+
+    image:
+      repository: dice-runner
+      pullPolicy: IfNotPresent
+      tag: "latest"
+
+    # Override container command and args.
+    # Default startup seeds <dataDir>/config/config.toml once from config below,
+    # then runs the image entrypoint with that writable, persistent config.
+    # An explicit command override is responsible for its own config setup.
+    command: []
+    args: []
+
+    imagePullSecrets: []
+    podAnnotations: {}
+    runtimeClassName: ""
+    # Expose the node PID namespace to the runner pod. This can help NVML
+    # per-process GPU memory match host PIDs in Docker/Kubernetes, but requires
+    # a Pod Security policy/profile that allows hostPID.
+    hostPID: false
+
+    podSecurityContext:
+      fsGroup: 1000
+      fsGroupChangePolicy: OnRootMismatch
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+
+    service:
+      type: ClusterIP
+      # Unified single-port bind (see config.unified via configmap). The runner
+      # serves inference + management + metrics + console on this one port under
+      # base_path/api; the platform proxy and the probes both use it.
+      inferencePort: 8080
+      inferenceTargetPort: 8080
+
+    # Test runner defaults: schedule one pod on a GPU node and reserve exactly
+    # one NVIDIA GPU. Override these when the cluster uses different labels.
+    nodeSelector:
+      accelerator: nvidia-gpu
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+    affinity: {}
+
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+        nvidia.com/gpu: "1"
+      limits:
+        cpu: "2"
+        memory: 4Gi
+        nvidia.com/gpu: "1"
+
+    env:
+      # The NVIDIA device plugin/runtime normally injects device visibility.
+      # Explicit capabilities make NVML/utility libraries available for GPU
+      # metrics in minimal non-CUDA runtime images.
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    extraEnv: []
+
+    config:
+      # Initial values only. Existing config/config.toml on the data volume
+      # survives restarts and is subsequently managed by Runner.
+      disableTokenAuthorization: true
+      # Enable TS_* env overrides (see runner/config.example.toml for the
+      # full list of TS_* variables this unlocks).
+      enableEnvvarsConfig: true
+      enableModelApi: true
+      enableEnvApi: true
+      basePath: /runner
+      # Runner durable data root. The runner derives:
+      #   models -> <dataDir>/models
+      #   envs   -> <dataDir>/envs
+      #   logs   -> <dataDir>/logs
+      dataDir: /var/lib/dice-runner
+      loadModels: []
+      defaultWorkersPerModel: 0
+      defaultResponseTimeout: 120
+      defaultStartupTimeout: 120
+      jobQueueSize: 100
+      maxRequestSize: "6553500"
+      maxResponseSize: "6553500"
+      asyncLogging: true
+      metricsMode: prometheus
+      systemMetricsIntervalSecs: 10
+      metricsArchiveEnabled: true
+      metricsArchiveIntervalSecs: 5
+      metricsArchiveRetentionDays: 7
+      numberOfGpu: 1
+      pythonEnvs:
+        default: python3
+      extraToml: ""
+
+    storage:
+      # Mount the entire data directory so models, environments, databases,
+      # TensorRT caches, and other runtime state survive pod recreation.
+      sizeLimit: 50Gi
+      persistence:
+        enabled: true
+        existingClaim: ""
+        claimName: ""
+        storageClass: ""
+        size: 50Gi
+        accessModes:
+          - ReadWriteOnce
+        annotations: {}
+
+    livenessProbe:
+      httpGet:
+        path: /runner/api/ping
+        port: inference
+      initialDelaySeconds: 15
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+    # Snapshot restore can load GPU-backed workers before the management
+    # listener is bound. Gate liveness/readiness during that startup window so
+    # Istio's rewritten app probe does not restart the pod while models restore.
+    startupProbe:
+      httpGet:
+        path: /runner/api/ping
+        port: inference
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 120
+
+    readinessProbe:
+      httpGet:
+        path: /runner/api/ping
+        port: inference
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+    extraVolumes: []
+    extraVolumeMounts: []
+
+  # =============================================================================
+  # Training Infrastructure Configuration
+  # =============================================================================
+  training:
+    enabled: true
+
+    # Namespace for training jobs (can be different from app namespace)
+    namespace: training
+
+    # Istio sidecar injection (disable for training jobs)
+    istio:
+      inject: false
+
+    # Docker registry configuration
+    registry:
+      url: ghcr.io/vision-ai
+      pullSecret: ""
+
+    # Keep current trainer images in use on selected nodes so image GC retains them.
+    # Enable in staging only when production shares the same nodes and images.
+    imageCache:
+      enabled: false
+      # DaemonSet rollout concurrency; accepts an integer or percentage string.
+      maxUnavailable: 1
+      nodeNames:
+        - gpu06
+        - gpu08
+        - node1
+        - node2
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: dedicated
+          operator: Equal
+          value: llm
+          effect: NoSchedule
+      # Per image: only a sleep process runs; no GPU is requested.
+      resources:
+        requests:
+          cpu: 1m
+          memory: 8Mi
+        limits:
+          cpu: 10m
+          memory: 32Mi
+
+    # Service Account for training jobs
+    serviceAccount:
+      create: true
+      name: ""  # Defaults to {release}-training-job-sa
+      annotations: {}
+
+    # RBAC configuration
+    rbac:
+      create: true
+
+    # Job default settings
+    job:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 3600
+      activeDeadlineSeconds: 86400  # 24 hours
+
+    # The backend owns export discovery and submits the image warmup Jobs.
+    datasetCache:
+      enabled: true
+      discoveryIntervalSeconds: 300
+      image:
+        repository: vision-ai-dataset-cache
+        tag: latest
+        pullPolicy: Always
+      maxActiveJobs: 1
+      job:
+        backoffLimit: 0
+        activeDeadlineSeconds: 21600
+        ttlSecondsAfterFinished: 300
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+
+    # Job-level GPU node failover.  This does not cordon cluster nodes.
+    nodeFailover:
+      enabled: true
+      maxAttempts: 2
+      quarantineTtlMinutes: 30
+      failureObservationSeconds: 120
+      healthyConsecutiveChecks: 3
+      detectionPollIntervalSeconds: 30
+      # "failed" terminates after the limit; "waiting" retains a non-terminal reason.
+      maxAttemptsOutcome: waiting
+
+    # Default resource configuration
+    resources:
+      defaults:
+        cpu:
+          request: "2"
+          limit: "4"
+        memory:
+          request: 8Gi
+          limit: 16Gi
+        gpu:
+          limit: "1"
+        # Shared memory for PyTorch DataLoader workers
+        # Increase this if you see "DataLoader worker killed by signal: Bus error"
+        shm:
+          size: 8Gi
+
+    # GPU node configuration
+    gpu:
+      nodeSelector:
+        accelerator: nvidia-gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+    # Storage configuration (PVC-based caching for training jobs)
+    storage:
+      # Shared image-object cache populated by the dedicated Cache Worker.
+      # Trainer Jobs mount this PVC read-only.
+      datasets:
+        enabled: false
+        create: true  # Create PVC via Helm (set false to use existing PVC)
+        pvcName: datasets-cache-pvc
+        storageClass: ""  # Empty = default StorageClass, or specify: nfs-client, cephfs, etc.
+        size: 100Gi
+        accessModes:
+          - ReadWriteMany  # RWX for multi-job access
+        mountPath: /data/datasets
+        cacheMaxSizeGB: 100  # Cache Worker dataset-level capacity with LRU eviction
+
+      # Models cache: Stores pre-trained model weights (HuggingFace, PyTorch, YOLO, etc.)
+      # Shared across jobs to avoid re-downloading from model hubs
+      modelsCache:
+        enabled: false
+        create: true
+        pvcName: models-cache-pvc
+        storageClass: ""
+        size: 50Gi
+        accessModes:
+          - ReadWriteMany
+        mountPath: /data/models
+
+    # S3/MinIO configuration
+    s3:
+      enabled: true
+      createSecret: true # false = use existing secretName without rendering it
+      secretName: training-s3-credentials
+      # Override during installation:
+      # --set-string training.s3.accessKey=xxx --set-string training.s3.secretKey=xxx
+      accessKey: ""
+      secretKey: ""
+      endpoint: ""
+      bucket: ""
+
+    # Space GPU cluster execution.
+    # When enabled, the backend injects these values into Space adapter Jobs.
+    # Credentials are mounted only into the backend pod and forwarded to the
+    # short-lived adapter Job as env vars; raw storage credentials are still not
+    # sent to Space trainer containers.
+    space:
+      enabled: false
+
+      # Optional full adapter image override. Empty = frameworks.space.image_suffix:image_tag
+      adapterImage: ""
+      # SPACE custom image namespace. Backend strips Docker registry/tag from
+      # trainer images and sends {imagePrefix}/{image_name} to SPACE.
+      imagePrefix: gtr-ai-vision
+
+      # Trainer source code bundles are published by the internal trainer
+      # matrix under the same per-trainer version tag as that trainer's Docker
+      # image (frameworks.<name>.image_tag). The backend sends only a
+      # presigned download URL to the SPACE run, then the launcher extracts
+      # the bundle under /home/user/{framework}.
+      codeBundle:
+        enabled: true
+        bucket: ""  # Empty = use S3_BUCKET
+        prefix: space-code
+        root: /home/user
+        presignExpirationSeconds: 604800
+
+      # Space CLI / API account. Prefer an existing Secret in the backend
+      # namespace. Set create=true only for quick internal installs.
+      credentials:
+        create: false
+        existingSecret: ""
+        secretName: ""
+        username: ""
+        password: ""
+        usernameKey: username
+        passwordKey: password
+
+      # Space run creation settings. The current PVC mount path requires API
+      # create mode because the verified CLI create command has no volume flag.
+      region: gumi-1
+      groupId: GTR-AI-VISION
+      groupPoolId: "171"
+      quotaId: "150"
+      experimentId: "453"
+      coreId: "2"
+      coreCount: "1"
+      expectedRunTime: ""
+      createMode: api
+      apiBaseUrl: https://mlp.n7.sr-cloud.com
+      configPath: ""
+      inputDatasets: "[]"
+      enabledRunFeatures: "[]"
+      allowSpot: "false"
+      emailNoticeCode: "0"
+      isSetupRun: "false"
+      runType: batch
+      type: oneOff
+
+      # Space Data Volumes. These names are Space volume claim ids, not K8s
+      # PVC names in the training namespace, though the defaults intentionally
+      # mirror the K8s cache contract.
+      cache:
+        datasets:
+          claimId: datasets-cache-pvc
+          mountPath: /data/datasets
+          maxSizeGB: "500"
+        models:
+          claimId: models-cache-pvc
+          mountPath: /data/models
+
+      # Adapter K8s Job resource envelope. GPU must remain 0; the actual GPU
+      # workload runs inside Space.
+      adapterJob:
+        gpuLimit: "0"
+        cpuRequest: 100m
+        cpuLimit: "1"
+        memoryRequest: 256Mi
+        memoryLimit: 1Gi
+        backoffLimit: "0"
+        activeDeadlineSeconds: "262800"
+
+      createTimeoutSeconds: "300"
+      # 0 means unlimited; the adapter Job activeDeadlineSeconds is the hard cap.
+      logReconnectLimit: "0"
+      logReconnectBaseDelay: "2.0"
+      logReconnectMaxDelay: "30.0"
+
+      # Retries for the adapter's single-shot Space CLI calls: stopping a run
+      # on shutdown, and the terminal-status query used when no completion
+      # event was ever observed. A transient failure here would otherwise
+      # orphan a billed Space GPU run or mis-report a real success as failed.
+      stopRetryAttempts: "3"
+      stopRetryBaseDelay: "2.0"
+      statusQueryRetryAttempts: "3"
+      statusQueryRetryBaseDelay: "5.0"
+
+    # Framework-specific configurations
+    frameworks:
+      ultralytics:
+        enabled: true
+        image_suffix: trainer-ultralytics
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 8Gi
+            limit: 16Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      huggingface:
+        enabled: true
+        image_suffix: trainer-huggingface
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 16Gi
+            limit: 32Gi
+        # When modelsCache is enabled, HF_HOME/TRANSFORMERS_CACHE are set via _defaults
+        # pointing to shared PVC. The values below are fallback for emptyDir cache.
+        extra_env:
+          - name: HF_HOME
+            value: /tmp/huggingface
+          - name: TRANSFORMERS_CACHE
+            value: /tmp/huggingface/transformers
+        extra_volumes:
+          - name: hf-cache
+            emptyDir:
+              sizeLimit: 10Gi
+        extra_volume_mounts:
+          - name: hf-cache
+            mountPath: /tmp/huggingface
+
+      timm:
+        enabled: true
+        image_suffix: trainer-timm
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 8Gi
+            limit: 16Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      vfm-v1:
+        enabled: true
+        image_suffix: trainer-vfm-v1
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 16Gi
+            limit: 32Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      vfm-v1-cu128:
+        enabled: true
+        image_suffix: trainer-vfm-v1-cu128
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 16Gi
+            limit: 32Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      vfm-v3-det-bastion:
+        enabled: true
+        image_suffix: trainer-vfm-v3-det-bastion
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 16Gi
+            limit: 32Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      dice_v1:
+        enabled: true
+        image_suffix: trainer-dice-v1
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 8Gi
+            limit: 16Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      openmm-cu118:
+        enabled: true
+        image_suffix: trainer-openmm-cu118
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 16Gi
+            limit: 32Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      openmm-cu128:
+        enabled: true
+        image_suffix: trainer-openmm-cu128
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 16Gi
+            limit: 32Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      space:
+        enabled: true
+        image_suffix: space-adapter
+        image_tag: "latest"  # Per-trainer image tag. CI updates this independently
+        resources:
+          memory:
+            request: 8Gi
+            limit: 16Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+      custom:
+        enabled: true
+        resources:
+          memory:
+            request: 8Gi
+            limit: 16Gi
+        extra_env: []
+        extra_volumes: []
+        extra_volume_mounts: []
+
+    # Debug pod for troubleshooting storage and training issues
+    # Access via: kubectl exec -it -n training debug-pod -- /bin/sh
+    debugPod:
+      enabled: false
+      image: python
+      tag: "3.11-slim"
+
+    # Proxy configuration for corporate network (behind firewall)
+    # Used when training jobs need to access external resources (GitHub, PyPI, model hubs)
+    proxy:
+      enabled: false
+      httpProxy: ""      # e.g., http://proxy.corp.com:8080
+      httpsProxy: ""     # e.g., http://proxy.corp.com:8080
+      noProxy: "localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      # hf-xet often bypasses the requests-based HTTP backend and tends to break
+      # behind SSL-inspecting corporate proxies. Keep it disabled by default when
+      # proxy mode is enabled.
+      disableXet: true
+      # CA certificate for corporate proxy / SSL inspection
+      caCert:
+        enabled: false
+        # Option 1: Use existing Secret containing CA certificate
+        secretName: corporate-ca-cert   # Secret with key: ca.crt
+        # Option 2: Use existing ConfigMap (set useConfigMap: true)
+        useConfigMap: false
+        configMapName: corporate-ca-cert
+        # Mount path for the CA certificate
+        mountPath: /etc/ssl/certs/corporate-ca.crt
+        # Certificate file key in Secret/ConfigMap
+        key: ca.crt
+
+    # Pod security context for training jobs
+    podSecurityContext:
+      fsGroup: 1000
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+
+# Labeler application values.
+labeler:
+  enabled: true
+  # Defaults to <release>-labeler-* resource names (e.g. dice-labeler-backend).
+  nameOverride: ""
+  fullnameOverride: ""
+  # Vision AI Labeler - Helm Values
+
+  # Backend
+  backend:
+    resources: {} # Optional; existing releases keep their current resource policy
+    image:
+      repository: dice-docker-local.bart.sec.samsung.net/dice-labeler-backend
+      tag: "latest"
+    replicas: 1
+    port: 8001
+
+    startupProbe:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 5
+      failureThreshold: 60
+
+    livenessProbe:
+      path: /health
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 5
+
+    readinessProbe:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
+
+    # Override container command (optional)
+    # command: ["./docker-entrypoint.sh"]
+    # args: []
+
+    # Security context (internal network - relaxed)
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+
+    env:
+      # App
+      ENVIRONMENT: "production"
+      DEBUG: "false"
+      LOG_LEVEL: "INFO"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8001"
+      API_V1_PREFIX: "/labeler/api/v1"
+      RUN_MIGRATIONS: "true"
+
+      CORS_ORIGINS: "http://localhost:3010,http://localhost:3000,https://dice.gtrai.sec.samsung.net"
+      FRONTEND_URL: "https://dice.gtrai.sec.samsung.net/labeler"
+
+      # Platform Database
+      PLATFORM_DB_HOST: "localhost"
+      PLATFORM_DB_PORT: "5434"
+      PLATFORM_DB_NAME: "platform"
+      PLATFORM_DB_USER: "admin"
+      PLATFORM_DB_PASSWORD: "devpass"
+
+      # Labeler Database
+      LABELER_DB_HOST: "localhost"
+      LABELER_DB_PORT: "5434"
+      LABELER_DB_NAME: "labeler"
+      LABELER_DB_USER: "admin"
+      LABELER_DB_PASSWORD: "devpass"
+
+      # S3 Storage
+      S3_ENDPOINT: ""
+      S3_ENDPOINT_PUBLIC: ""
+      S3_ACCESS_KEY: ""
+      S3_SECRET_KEY: ""
+      S3_BUCKET: ""
+      S3_REGION: "us-east-1"
+      S3_USE_SSL: "true"
+
+      SERVICE_JWT_SECRET: "dev-service-jwt-secret"
+      SERVICE_JWT_ALGORITHM: "HS256"
+
+      USER_SERVICE_API_URL: "http://dice-user-service.dice.svc.cluster.local:8003"
+
+      # Image Tools Super-Resolution: migrated models route to DICE Runner (same K8s namespace as backend)
+      DICE_RUNNER_BASE_URL: "" # Empty = release-local runner
+      # Optional debug override for local / external debug (leave empty in cluster)
+      # DICE_RUNNER_DEBUG_BASE_URL: ""
+
+      # Legacy TorchServe pods (fallback for versions not migrated to DICE Runner)
+      REALESRGAN_SERVICE_BASE_URL: "http://{pod}"
+      REALESRGAN_INFERENCE_TIMEOUT_SECONDS: "600"
+      # Optional per-pod override for local / external debug (leave empty in cluster)
+      # REALESRGAN_X4: ""
+
+      REDIS_URL: ""
+      LARGE_UPLOAD_IMPORT_QUEUE_NAME: "dataset-imports"
+      LARGE_UPLOAD_IMPORT_JOB_TIMEOUT_SECONDS: "43200"
+      ANNOTATION_BULK_QUEUE_NAME: "annotation-bulk-ops"
+      ANNOTATION_BULK_JOB_TIMEOUT_SECONDS: "7200"
+      ANNOTATION_BULK_JOB_CHUNK_SIZE: "200"
+      DB_POOL_SIZE: "10"
+      DB_MAX_OVERFLOW: "20"
+      DB_POOL_TIMEOUT_SECONDS: "30"
+
+  # Large upload import worker
+  importWorker:
+    enabled: false
+    image:
+      # Defaults to labeler.backend.image when left empty.
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+    replicas: 1
+
+    command:
+      - python
+      - -m
+      - app.dataset.infrastructure.large_upload_import_worker
+    args: []
+
+    # Inherits labeler.backend.env first, then overrides with these values.
+    # Keep REDIS_URL and LARGE_UPLOAD_IMPORT_QUEUE_NAME identical to backend.
+    env:
+      RUN_MIGRATIONS: "false"
+
+    # The worker downloads and extracts large zip files in local temp storage.
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+        ephemeral-storage: 20Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+        ephemeral-storage: 50Gi
+
+    securityContext: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Durable automatic labeling: independent CPU/control pools, no GPU requests.
+  inferenceWorkers:
+    enabled: false
+    replicas:
+      dispatcher: 1
+      control: 1
+      prepare: 1
+      save: 1
+    # Inherits backend DB, S3, service JWT, Platform URL, slot and Redis config.
+    env:
+      RUN_MIGRATIONS: "false"
+      WAIT_FOR_DB: "false"
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "2"
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Annotation bulk operations worker
+  bulkWorker:
+    enabled: false
+    image:
+      # Defaults to labeler.backend.image when left empty.
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+    replicas: 1
+
+    command:
+      - python
+      - -m
+      - app.annotation.infrastructure.bulk_assignment_worker
+    args: []
+
+    # Inherits labeler.backend.env first, then overrides with these values.
+    # Keep REDIS_URL identical to backend, but use ANNOTATION_BULK_QUEUE_NAME.
+    env:
+      RUN_MIGRATIONS: "false"
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "2"
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+    securityContext: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Version publish worker
+  publishWorker:
+    enabled: false
+    image:
+      # Defaults to labeler.backend.image when left empty.
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+    replicas: 1
+
+    command:
+      - python
+      - -m
+      - app.versioning.infrastructure.publish_worker
+    args: []
+
+    # Inherits labeler.backend.env first, then overrides with these values.
+    # Keep REDIS_URL identical to backend; PUBLISH_QUEUE_NAME must match the backend too.
+    env:
+      RUN_MIGRATIONS: "false"
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "2"
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+    securityContext: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Super-resolution dataset build worker
+  srBuildWorker:
+    enabled: false
+    # auto: backend for consolidated workloads, legacy RQ elsewhere.
+    executionMode: auto
+    image:
+      # Defaults to labeler.backend.image when left empty.
+      repository: ""
+      tag: ""
+      pullPolicy: IfNotPresent
+    replicas: 1
+
+    command:
+      - python
+      - -m
+      - app.dataset.infrastructure.sr_build_worker
+    args: []
+
+    # Inherits labeler.backend.env first, then overrides with these values.
+    # Keep REDIS_URL identical to backend; SUPER_RESOLUTION_BUILD_QUEUE_NAME and
+    # the REALESRGAN_* TorchServe settings must match the backend too.
+    env:
+      RUN_MIGRATIONS: "false"
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "2"
+
+    # Holds a bounded batch of decoded (upscaled) images in memory per job.
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+    securityContext: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Frontend
+  frontend:
+    resources: {}
+    image:
+      repository: dice-docker-local.bart.sec.samsung.net/dice-labeler-frontend
+      tag: "latest"
+    replicas: 1
+    port: 3000
+
+    # Override container command (optional)
+    # command: ["npm", "run", "dev"]
+    # args: []
+
+    # Security context for nginx-unprivileged
+    securityContext:
+      runAsUser: 101
+      runAsGroup: 101
+      fsGroup: 101
+
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 3000
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 3000
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+    # Public values are baked into the static frontend image at build time by CI.
+    # They remain here only as chart-visible defaults; nginx does not read them at runtime.
+    env:
+      # Backend API
+      NEXT_PUBLIC_API_URL: "/labeler/api/v1"
+      NEXT_PUBLIC_APP_NAME: "Vision AI Labeler"
+      NEXT_PUBLIC_BASE_PATH: "/labeler"
+      NEXT_PUBLIC_HOME_URL: "/"
+      NEXT_PUBLIC_LABELER_URL: "/labeler"
+      NEXT_PUBLIC_PLATFORM_URL: "/platform"
+      NEXT_PUBLIC_RUNNER_URL: "/runner"
+      NEXT_PUBLIC_DOCS_URL: "/docs/ko/guide/overview"
+      NEXT_PUBLIC_ACTIVATION_URL: "/activation"
+      NEXT_PUBLIC_DOWNLOADS_URL: "/downloads"
+
+      # Feature Flags
+      NEXT_PUBLIC_ENABLE_IMAGE_LOCK: "true"
+
+  # Ingress (optional)
+  ingress:
+    enabled: false
+    host: ""
+    annotations: {}
+
+  # Image pull secrets (optional)
+  imagePullSecrets: []
+
+################################################################################
+# Dice Bot Backend
+################################################################################
+diceBot:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: dice-docker-local.bart.sec.samsung.net/vision-dice-bot
+    pullPolicy: IfNotPresent
+    tag: "latest"
+
+  imagePullSecrets:
+    - name: regcred
+
+  environment: "production"
+  logLevel: "INFO"
+  baseUrl: "/api/v1/dice-bot"
+
+  # Configuration for upstream services
+  config:
+    # If not set, will auto-discover from labeler service
+    activationBaseUrl: ""
+    trainerServiceBaseUrl: ""
+    # Messenger (message send) — host-only base URL, System-ID, and Access Token.
+    # NOTE: messengerAccessToken is a placeholder default; override per environment
+    # (ideally via a Secret) with the real token.
+    messengerBaseUrl: "http://localhost:8000"
+    messengerSystemId: "C60LD0001"
+    messengerAccessToken: "changeme-messenger-access-token"
+    # Additional environment variables
+    env: {}
+
+  command: []
+  args: []
+
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+
+  podAnnotations: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  # Health checks
+  livenessProbe:
+    httpGet:
+      path: /api/v1/dice-bot/health
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /api/v1/dice-bot/health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  # Autoscaling
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  # Node affinity
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+
+  # Environment variables (if any secrets needed)
+  env: {}
+
+sharedInference:
+  enabled: false # Stage promotion opts in; production remains explicit.
+  nativeOnnxEnabled: false # Enable only after deploying compatible Runner/Gateway builds.
+  enableMaskAnnotations: false
+  existingSecret: "" # Defaults to <release>-inference-gateway; provision before Sync.
+  image:
+    repository: dice-docker-local.bart.sec.samsung.net/dice-inference-gateway
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  blobStorage:
+    existingClaim: ""
+    storageClass: nfs-csi
+    size: 10Gi
+  resources:
+    requests: {cpu: 200m, memory: 256Mi}
+    limits: {cpu: "2", memory: 1Gi}
+  managedBudgetBytes: 4294967296
+  environments: {}
+  # Discover and reuse Runner installations; never add/remove an environment.
+  reuseInstalledEnvironments: true
+  # Optional per-alias compatibility/priority overrides for existing installations.
+  installedEnvironmentContracts: {}
+  # Compatibility is tied to an immutable environment bundle, never an export ID.
+  # Other bundles declare contracts in their environment profile or this map.
+  environmentContracts:
+    499f12be4332fba2ee1a922926e6b9bb2f149909abad9d4bd32250ddd89cc285:
+      - frameworks: [ultralytics]
+        runtime_formats: [onnx]
+        tasks: [detection, classification, instance_segmentation, obb]
+        priority: 0
+  modelBindings: {}
+  artifactAllowedOrigins: []
+
+autoLabeling:
+  # Auto-labeling ships enabled by default; every deployment needs the runner
+  # wiring below (GPU slot, CUDA-validated bundle). Set enabled: false to turn
+  # the feature off per release (kill-switch).
+  enabled: true
+  # BE background execution removes all automatic-labeling RQ Deployments.
+  executionMode: backend # rq restores the legacy transport.
+  # Provision before syncing; never reuse the environment-catalog token.
+  # Value must be a random credential of at least 32 bytes (e.g. 64 hex chars).
+  managedKeySecret:
+    name: "" # Defaults to <release>-runtime in the release namespace.
+    key: runner-managed-key
+  gpuUuid: GPU-b2bf15b0-12d6-a3cc-c9d4-09d8b4be0718
+  slotId: runner-0 # Use a new ID when the physical GPU changes; slot identities are immutable.
+  cacheStorageClass: nfs-csi
+  cacheSize: 10Gi
+  # Immutable, previously CUDA-validated bundle; bootstrap copies only this asset.
+  bundleSourceBucket: cosmo-storage-develop
+  bundleSourceKey: runner-envs/linux/validation/pr1399/20261012-ort1232-v1/ultralytics-autolabel-cu124-v1.zip
+  environment:
+    id: ultralytics-detection-onnx-v1
+    runner_alias: ultralytics-autolabel-cu124-v1
+    version: 2026.10.12-ort1232-v1
+    bundle_storage_key: runner-envs/linux/auto-labeling/2026.10.12-ort1232-v1/ultralytics-autolabel-cu124-v1.zip
+    bundle_sha256: 499f12be4332fba2ee1a922926e6b9bb2f149909abad9d4bd32250ddd89cc285
+    platform: linux
+    arch: x86_64
+    cuda: cu124
+
+# In-namespace PostgreSQL, to stop depending on cosmo-stage's shared DB
+# (that dependency took prod down when cosmo-stage's rook-cephfs pool had an
+# unrelated incident). Deployed here but not wired up as the active
+# DATABASE_URL yet -- data migration is done manually via pgAdmin, then the
+# platform/labeler env vars get pointed at this service.
+# Shared S3 env for backend, Labeler/workers/ML/SAM2 and web-auth (opt-in).
+# Supplied S3_* keys replace per-component values only when explicitly enabled.
+storage:
+  connectApplications: false
+  env: {}
+
+database:
+  enabled: true
+  imagePullSecrets:
+    - name: regcred
+
+  postgres:
+    # Defect Studio can use 4 x 16 thumbnail connections in addition to the
+    # Platform/Labeler/API pools. Applied at PostgreSQL startup, including PVCs.
+    maxConnections: 200
+    image:
+      repository: docker-remote.bart.sec.samsung.net/postgres
+      tag: "15"
+      pullPolicy: IfNotPresent
+    port: 5432
+    user: postgres
+    password: "1234"
+    passwordSecret: {} # {name: dice-stage-database, key: password}
+    # Official image initialization on EMPTY volumes only; never a migration.
+    initialDatabase: "" # Empty preserves POSTGRES_USER image default
+    initDatabases: [] # e.g. [platform, labeler, users]
+
+  pgadmin:
+    enabled: true # Controls the pgAdmin container, volume, PVC, and optional Service
+    image:
+      repository: docker-remote.bart.sec.samsung.net/dpage/pgadmin4
+      tag: "7.7"
+      pullPolicy: IfNotPresent
+    defaultEmail: test@hello.com
+    defaultPassword: "1234"
+    defaultPasswordSecret: {} # {name: dice-database, key: pgadmin-password}; overrides defaultPassword
+    csrfEnabled: false
+    service:
+      enabled: false
+      name: "" # Defaults to the database fullname with a -pgadmin suffix
+
+  # Deliberately NOT rook-cephfs -- that shared pool is what took cosmo-stage's
+  # database down, and this DB shouldn't share fate with it.
+  dataVolume:
+    existingClaim: ""
+    storageClass: nfs-csi
+    size: 100Gi
+    accessModes:
+      - ReadWriteOnce
+
+  pgadminVolume:
+    existingClaim: ""
+    storageClass: nfs-csi
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+
+  resources:
+    postgres:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+    pgadmin:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  nodeSelector: {}
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - "node1"
+  tolerations: []
+
+################################################################################
+# User Service — owns users/auth/PAT/access-requests/audit-logs.
+# See docs/todo/reference/USER_SERVICE_DESIGN.md.
+################################################################################
+userService:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: dice-docker-local.bart.sec.samsung.net/vision-user-service
+    pullPolicy: IfNotPresent
+    tag: "latest"
+
+  imagePullSecrets:
+    - name: regcred
+
+  # Configuration rendered into the ConfigMap (templates/user-service/configmap.yaml)
+  config:
+    apiV1Prefix: "/user/api/v1"
+    backendPort: "8003"
+    corsOrigins: "http://localhost:3000,http://localhost:3010,http://localhost:5173,http://localhost:8080"
+
+    # Must point at the SAME physical DB as platform.backend.env.USER_DATABASE_URL.
+    userDatabaseUrl: "postgresql://admin:devpass@localhost:5434/users"
+
+    # Must be byte-identical to web-auth / platform.backend / labeler's
+    # SERVICE_JWT_SECRET. Plaintext only — prefer a SERVICE_JWT_SECRET entry
+    # under userService.secretEnv (Secret-backed); when present it wins and
+    # this key is omitted from the ConfigMap.
+    serviceJwtSecret: "dev-service-jwt-secret"
+    serviceJwtAlgorithm: "HS256"
+
+    # If not set, auto-discovers dice-bot's in-cluster service (same pattern
+    # as platform.backend.env.BOT_BACKEND_URL).
+    botBackendUrl: ""
+    # Knox ID / channel dice-bot notifies for pending access requests.
+    adminNotifyTarget: ""
+
+    # Additional environment variables
+    env: {}
+
+  # Optional Secret-backed environment variables.
+  secretEnv: []
+
+  command: []
+  args: []
+
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+
+  podAnnotations: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8003
+
+  # Cluster-internal only by default — public /user routing is added via an
+  # out-of-repo Istio VirtualService change, not this Ingress. See
+  # docs/todo/reference/USER_SERVICE_DESIGN.md "알려진 위험".
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: ""
+        paths:
+          - path: /user
+            pathType: Prefix
+    tls: []
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+
+  # Extra raw environment variables (e.g. secrets set via --set at install
+  # time), merged alongside the ConfigMap in the Deployment's env: block.
+  env: {}
+
+# Group CPU worker processes without merging their queues or images.
+workloadConsolidation:
+  enabled: false # Explicit opt-in outside staging.
+  staging:
+    enabled: true # Applies only to namespace dice-stage; false restores separate Deployments.
+  terminationGracePeriodSeconds: 7500 # Graceful stop budget; drain long-running imports/SR builds before sync.
+  autoLabeling:
+    labelerWorkerResources:
+      requests: {cpu: 600m, memory: 1536Mi}
+      limits: {cpu: "3", memory: 6Gi}
+    platformWorkerResources:
+      requests: {cpu: 400m, memory: 1Gi}
+      limits: {cpu: "4", memory: 4Gi}
+    replicas: 1
+    podSecurityContext: {fsGroup: 1000}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+  # Shared consumers rotate queues after each completed job; they do not preempt jobs.
+  operationsWorkerResources:
+    requests: {cpu: 400m, memory: 1Gi}
+    limits: {cpu: "2", memory: 2Gi}

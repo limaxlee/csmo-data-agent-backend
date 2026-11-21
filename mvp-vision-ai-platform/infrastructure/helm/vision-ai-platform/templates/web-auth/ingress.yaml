@@ -1,0 +1,42 @@
+{{- if and .Values.webAuth.enabled .Values.webAuth.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "vision-ai.webAuth.fullname" . }}
+  labels:
+    {{- include "vision-ai.webAuth.labels" . | nindent 4 }}
+  {{- with .Values.webAuth.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.webAuth.ingress.className }}
+  ingressClassName: {{ .Values.webAuth.ingress.className }}
+  {{- end }}
+  {{- if .Values.webAuth.ingress.tls }}
+  tls:
+    {{- range .Values.webAuth.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.webAuth.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "vision-ai.webAuth.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}
+

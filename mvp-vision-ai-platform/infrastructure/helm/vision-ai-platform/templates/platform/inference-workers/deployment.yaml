@@ -1,0 +1,81 @@
+{{- if and (ne (include "vision-ai.autoLabeling.backendExecution" .) "true") (ne (include "vision-ai.consolidation.enabled" .) "true") (eq (include "vision-ai.autoLabeling.enabled" .) "true") }}
+{{- $root := . }}
+{{- $env := include "vision-ai.autoLabeling.platformEnv" (dict "root" . "env" .Values.platform.backend.env) | fromYaml }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "platform") | fromYaml }}
+{{- range $phase := list "dispatcher" "prepare" "gpu" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.backend.fullname" $root }}-inference-{{ $phase }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: platform-inference-{{ $phase }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $root.Template.BasePath "/platform/backend/configmap.yaml") $root | sha256sum }}
+      labels:
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+        app.kubernetes.io/component: platform-inference-{{ $phase }}
+    spec:
+      terminationGracePeriodSeconds: 630
+      securityContext:
+        {{- toYaml $root.Values.platform.backend.podSecurityContext | nindent 8 }}
+      imagePullSecrets:
+        {{- toYaml $root.Values.platform.backend.imagePullSecrets | nindent 8 }}
+      initContainers:
+        - name: inference-schema
+          image: "{{ $root.Values.platform.backend.image.repository }}:{{ $root.Values.platform.backend.image.tag | default $root.Chart.AppVersion }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.services.inference_schema", "wait"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" $root }}-config
+          env:
+            - name: TZ
+              value: "UTC"
+            {{- include "vision-ai.autoLabeling.platformSecrets" $env | nindent 12 }}
+        - name: inference-environment
+          image: "{{ $root.Values.platform.backend.image.repository }}:{{ $root.Values.platform.backend.image.tag | default $root.Chart.AppVersion }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.services.inference_bootstrap"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" $root }}-config
+          env:
+            - name: TZ
+              value: "UTC"
+            {{- include "vision-ai.autoLabeling.platformSecrets" $env | nindent 12 }}
+          volumeMounts:
+            - name: inference-cache
+              mountPath: /var/lib/platform/inference-cache
+      containers:
+        - name: inference-{{ $phase }}
+          image: "{{ $root.Values.platform.backend.image.repository }}:{{ $root.Values.platform.backend.image.tag | default $root.Chart.AppVersion }}"
+          command: ["uv", "run", "--no-project", "python", "-m"]
+          {{- if eq $phase "dispatcher" }}
+          args: ["app.services.gpu_dispatcher"]
+          {{- else }}
+          args: ["app.services.inference_rq_worker", {{ $phase | quote }}]
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.backend.fullname" $root }}-config
+          env:
+            - name: TZ
+              value: "UTC"
+            {{- include "vision-ai.autoLabeling.platformSecrets" $env | nindent 12 }}
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - name: inference-cache
+              mountPath: /var/lib/platform/inference-cache
+      volumes:
+        - name: inference-cache
+          persistentVolumeClaim:
+            claimName: {{ include "vision-ai.backend.fullname" $root }}-inference-cache
+{{- end }}
+{{- end }}

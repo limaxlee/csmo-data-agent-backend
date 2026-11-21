@@ -1,0 +1,23 @@
+{{- if and .Values.platform.runner.enabled .Values.platform.runner.storage.persistence.enabled (not .Values.platform.runner.storage.persistence.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vision-ai.runner.dataPvcName" . }}
+  labels:
+    {{- include "vision-ai.runner.labels" . | nindent 4 }}
+    storage-type: runner-data
+  {{- with .Values.platform.runner.storage.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.platform.runner.storage.persistence.accessModes | nindent 4 }}
+  {{- with .Values.platform.runner.storage.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.platform.runner.storage.persistence.size }}
+{{- end }}
+

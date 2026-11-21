@@ -1,3 +1,7 @@
+# NOT IN USE (2026-11-21). This file was never applied to the stage cluster:
+# stage DICE has no Samsung SSO, so the data agent sits on the production
+# address instead. The current rule is deploy/prod/routing.yaml.
+#
 # Forwarding rule for the data agent on the DICE stage address.
 #
 #   https://stage.gtrai.sec.samsung.net/data-agent/        -> 10.240.35.180:13080 (frontend)

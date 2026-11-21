@@ -1,0 +1,124 @@
+{{- if .Values.platform.backend.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vision-ai.backend.fullname" . }}-config
+  labels:
+    {{- include "vision-ai.backend.labels" . | nindent 4 }}
+data:
+  # Auto-generated API_BASE_URL for training pod callbacks
+  # Uses K8s FQDN for cross-namespace access: http://{service}.{namespace}.svc.cluster.local:{port}
+  {{- if not (kindIs "map" .Values.platform.backend.env.API_BASE_URL) }}
+  API_BASE_URL: {{ .Values.platform.backend.env.API_BASE_URL | default (printf "http://%s.%s.svc.cluster.local:%d" (include "vision-ai.backend.fullname" .) .Release.Namespace (.Values.platform.backend.service.port | int)) | quote }}
+  {{- end }}
+
+  # KubernetesTrainingManager configuration
+  {{- if .Values.platform.training.enabled }}
+  K8S_TRAINING_NAMESPACE: {{ include "vision-ai.training.namespace" . | quote }}
+  JOB_TEMPLATES_CONFIGMAP: "training-job-templates"
+  # Registry configuration (used as fallback when ConfigMap unavailable)
+  DOCKER_REGISTRY: {{ .Values.platform.training.registry.url | quote }}
+  {{- if .Values.platform.training.registry.pullSecret }}
+  IMAGE_PULL_SECRET: {{ .Values.platform.training.registry.pullSecret | quote }}
+  {{- end }}
+  # K8s training Job lifecycle settings (backoff / TTL / active deadline)
+  JOB_BACKOFF_LIMIT: {{ .Values.platform.training.job.backoffLimit | quote }}
+  JOB_TTL_SECONDS_AFTER_FINISHED: {{ .Values.platform.training.job.ttlSecondsAfterFinished | quote }}
+  JOB_ACTIVE_DEADLINE_SECONDS: {{ .Values.platform.training.job.activeDeadlineSeconds | quote }}
+  {{- if eq (include "vision-ai.datasetCache.enabled" .) "true" }}
+  DATASET_CACHE_DISCOVERY_ENABLED: "true"
+  DATASET_CACHE_DISCOVERY_INTERVAL_SECONDS: {{ .Values.platform.training.datasetCache.discoveryIntervalSeconds | quote }}
+  DATASET_CACHE_MAX_ACTIVE_JOBS: {{ .Values.platform.training.datasetCache.maxActiveJobs | quote }}
+  DATASET_CACHE_IMAGE: {{ printf "%s/%s:%s" (trimSuffix "/" .Values.platform.training.registry.url) .Values.platform.training.datasetCache.image.repository .Values.platform.training.datasetCache.image.tag | quote }}
+  DATASET_CACHE_MAX_GB: {{ .Values.platform.training.storage.datasets.cacheMaxSizeGB | quote }}
+  {{- $databaseURL := index .Values.platform.backend.env "DATABASE_URL" }}
+  {{- if and (kindIs "map" $databaseURL) (hasKey $databaseURL "valueFrom") (hasKey $databaseURL.valueFrom "secretKeyRef") }}
+  DATASET_CACHE_DATABASE_SECRET_NAME: {{ $databaseURL.valueFrom.secretKeyRef.name | quote }}
+  DATASET_CACHE_DATABASE_SECRET_KEY: {{ $databaseURL.valueFrom.secretKeyRef.key | quote }}
+  {{- else }}
+  DATASET_CACHE_DATABASE_SECRET_NAME: ""
+  DATASET_CACHE_DATABASE_SECRET_KEY: ""
+  {{- end }}
+  {{- end }}
+  {{- $space := .Values.platform.training.space }}
+  {{- if $space.enabled }}
+  # SpaceTrainingManager / space-adapter configuration
+  {{- if $space.adapterImage }}
+  SPACE_ADAPTER_IMAGE: {{ $space.adapterImage | quote }}
+  {{- end }}
+  SPACE_IMAGE_PREFIX: {{ $space.imagePrefix | quote }}
+  SPACE_CODE_BUNDLE_ENABLED: {{ $space.codeBundle.enabled | quote }}
+  {{- if $space.codeBundle.bucket }}
+  SPACE_CODE_BUNDLE_BUCKET: {{ $space.codeBundle.bucket | quote }}
+  {{- end }}
+  SPACE_CODE_BUNDLE_PREFIX: {{ $space.codeBundle.prefix | quote }}
+  SPACE_CODE_ROOT: {{ $space.codeBundle.root | quote }}
+  SPACE_CODE_BUNDLE_PRESIGN_EXPIRATION_SECONDS: {{ $space.codeBundle.presignExpirationSeconds | quote }}
+  SPACE_REGION: {{ $space.region | quote }}
+  SPACE_GROUP_ID: {{ $space.groupId | quote }}
+  SPACE_GROUP_POOL_ID: {{ $space.groupPoolId | quote }}
+  SPACE_QUOTA_ID: {{ $space.quotaId | quote }}
+  SPACE_EXPERIMENT_ID: {{ $space.experimentId | quote }}
+  SPACE_CORE_ID: {{ $space.coreId | quote }}
+  SPACE_CORE_COUNT: {{ $space.coreCount | quote }}
+  SPACE_EXPECTED_RUN_TIME: {{ $space.expectedRunTime | quote }}
+  SPACE_CREATE_MODE: {{ $space.createMode | quote }}
+  SPACE_API_BASE_URL: {{ $space.apiBaseUrl | quote }}
+  {{- if $space.configPath }}
+  SPACE_CONFIG_PATH: {{ $space.configPath | quote }}
+  {{- end }}
+  SPACE_INPUT_DATASETS: {{ $space.inputDatasets | quote }}
+  SPACE_ENABLED_RUN_FEATURES: {{ $space.enabledRunFeatures | quote }}
+  SPACE_ALLOW_SPOT: {{ $space.allowSpot | quote }}
+  SPACE_EMAIL_NOTICE_CODE: {{ $space.emailNoticeCode | quote }}
+  SPACE_IS_SETUP_RUN: {{ $space.isSetupRun | quote }}
+  SPACE_RUN_TYPE: {{ $space.runType | quote }}
+  SPACE_TYPE: {{ $space.type | quote }}
+  SPACE_DATASET_CACHE_CLAIM_ID: {{ $space.cache.datasets.claimId | quote }}
+  SPACE_DATASET_CACHE_DIR: {{ $space.cache.datasets.mountPath | quote }}
+  SPACE_DATASET_CACHE_MAX_GB: {{ $space.cache.datasets.maxSizeGB | quote }}
+  SPACE_MODELS_CACHE_CLAIM_ID: {{ $space.cache.models.claimId | quote }}
+  SPACE_MODELS_CACHE_DIR: {{ $space.cache.models.mountPath | quote }}
+  SPACE_ADAPTER_GPU_LIMIT: {{ $space.adapterJob.gpuLimit | quote }}
+  SPACE_ADAPTER_CPU_REQUEST: {{ $space.adapterJob.cpuRequest | quote }}
+  SPACE_ADAPTER_CPU_LIMIT: {{ $space.adapterJob.cpuLimit | quote }}
+  SPACE_ADAPTER_MEMORY_REQUEST: {{ $space.adapterJob.memoryRequest | quote }}
+  SPACE_ADAPTER_MEMORY_LIMIT: {{ $space.adapterJob.memoryLimit | quote }}
+  SPACE_ADAPTER_BACKOFF_LIMIT: {{ $space.adapterJob.backoffLimit | quote }}
+  SPACE_ADAPTER_ACTIVE_DEADLINE_SECONDS: {{ $space.adapterJob.activeDeadlineSeconds | quote }}
+  SPACE_CREATE_TIMEOUT_SECONDS: {{ $space.createTimeoutSeconds | quote }}
+  SPACE_LOG_RECONNECT_LIMIT: {{ $space.logReconnectLimit | quote }}
+  SPACE_LOG_RECONNECT_BASE_DELAY: {{ $space.logReconnectBaseDelay | quote }}
+  SPACE_LOG_RECONNECT_MAX_DELAY: {{ $space.logReconnectMaxDelay | quote }}
+  SPACE_STOP_RETRY_ATTEMPTS: {{ $space.stopRetryAttempts | quote }}
+  SPACE_STOP_RETRY_BASE_DELAY: {{ $space.stopRetryBaseDelay | quote }}
+  SPACE_STATUS_QUERY_RETRY_ATTEMPTS: {{ $space.statusQueryRetryAttempts | quote }}
+  SPACE_STATUS_QUERY_RETRY_BASE_DELAY: {{ $space.statusQueryRetryBaseDelay | quote }}
+  {{- end }}
+  {{- end }}
+
+  {{- $labelerApiURL := .Values.platform.backend.env.LABELER_API_URL }}
+  {{- if and (not $labelerApiURL) .Values.labeler.enabled }}
+  {{- $labelerApiURL = printf "http://%s-backend:%d" (include "vision-ai.labeler.fullname" .) (.Values.labeler.backend.port | int) }}
+  {{- end }}
+  {{- if not (kindIs "map" $labelerApiURL) }}
+  LABELER_API_URL: {{ $labelerApiURL | quote }}
+  {{- end }}
+
+  # Dice Bot Backend URL for training notifications
+  {{- $botApiUrl := .Values.platform.backend.env.BOT_API_URL }}
+  {{- if and (not $botApiUrl) .Values.diceBot.enabled }}
+  {{- $botApiUrl = printf "http://%s:%d%s" (include "vision-ai.diceBot.fullname" .) (.Values.diceBot.service.port | int) (.Values.diceBot.baseUrl) }}
+  {{- end }}
+  {{- if and $botApiUrl (not (kindIs "map" $botApiUrl)) }}
+  BOT_API_URL: {{ $botApiUrl | quote }}
+  {{- end }}
+
+  {{- $baseEnv := include "vision-ai.autoLabeling.platformEnv" (dict "root" . "env" .Values.platform.backend.env) | fromYaml }}
+  {{- $env := include "vision-ai.redis.applicationEnv" (dict "root" . "env" $baseEnv "database" "platform") | fromYaml }}
+  {{- range $key, $value := $env }}
+  {{- if and (ne $key "LABELER_API_URL") (ne $key "BOT_API_URL") (ne $key "API_BASE_URL") (not (kindIs "map" $value)) }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}

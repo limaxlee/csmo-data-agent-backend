@@ -1,0 +1,42 @@
+{{- if .Values.database.enabled }}
+{{- if not .Values.database.dataVolume.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vision-ai.database.fullname" . }}-data
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+  labels:
+    {{- include "vision-ai.database.labels" . | nindent 4 }}
+    storage-type: postgres-data
+spec:
+  accessModes:
+    {{- toYaml .Values.database.dataVolume.accessModes | nindent 4 }}
+  storageClassName: {{ .Values.database.dataVolume.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.database.dataVolume.size | quote }}
+{{- end }}
+{{- if and .Values.database.pgadmin.enabled (not .Values.database.pgadminVolume.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vision-ai.database.fullname" . }}-pgadmin
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+  labels:
+    {{- include "vision-ai.database.labels" . | nindent 4 }}
+    storage-type: pgadmin-data
+spec:
+  accessModes:
+    {{- toYaml .Values.database.pgadminVolume.accessModes | nindent 4 }}
+  storageClassName: {{ .Values.database.pgadminVolume.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.database.pgadminVolume.size | quote }}
+{{- end }}
+{{- end }}
+

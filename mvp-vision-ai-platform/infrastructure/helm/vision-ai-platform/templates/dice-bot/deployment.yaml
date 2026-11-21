@@ -1,0 +1,77 @@
+{{- if .Values.diceBot.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.diceBot.fullname" . }}
+  labels:
+    {{- include "vision-ai.diceBot.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.diceBot.autoscaling.enabled }}
+  replicas: {{ .Values.diceBot.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.diceBot.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/dice-bot/configmap.yaml") . | sha256sum }}
+      {{- with .Values.diceBot.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "vision-ai.diceBot.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.diceBot.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vision-ai.diceBot.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.diceBot.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dice-bot
+          securityContext:
+            {{- toYaml .Values.diceBot.securityContext | nindent 12 }}
+          image: "{{ .Values.diceBot.image.repository }}:{{ .Values.diceBot.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.diceBot.image.pullPolicy }}
+          {{- with .Values.diceBot.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.diceBot.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.diceBot.fullname" . }}-config
+          {{- if .Values.diceBot.env }}
+          env:
+            {{- range $key, $value := .Values.diceBot.env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.diceBot.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.diceBot.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.diceBot.resources | nindent 12 }}
+      {{- with .Values.diceBot.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.diceBot.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.diceBot.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,76 @@
+{{- if and .Values.labeler.enabled .Values.labeler.srBuildWorker.enabled (ne (include "vision-ai.consolidation.enabled" .) "true") (ne (include "vision-ai.srBuild.backend" .) "true") }}
+{{- $imageRepository := default .Values.labeler.backend.image.repository .Values.labeler.srBuildWorker.image.repository }}
+{{- $imageTag := default .Values.labeler.backend.image.tag .Values.labeler.srBuildWorker.image.tag }}
+{{- $backendEnv := default (dict) .Values.labeler.backend.env }}
+{{- $workerEnv := default (dict) .Values.labeler.srBuildWorker.env }}
+{{- $env := mergeOverwrite (deepCopy $backendEnv) $workerEnv }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "labeler") | fromYaml }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.labeler.fullname" . }}-sr-build-worker
+  labels:
+    {{- include "vision-ai.labeler.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sr-build-worker
+spec:
+  replicas: {{ .Values.labeler.srBuildWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: sr-build-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: sr-build-worker
+    spec:
+      {{- with .Values.labeler.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.labeler.srBuildWorker.securityContext }}
+      securityContext:
+        {{- toYaml .Values.labeler.srBuildWorker.securityContext | nindent 8 }}
+      {{- else }}
+      {{- with .Values.labeler.backend.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: sr-build-worker
+          image: "{{ $imageRepository }}:{{ $imageTag }}"
+          {{- with .Values.labeler.srBuildWorker.image.pullPolicy }}
+          imagePullPolicy: {{ . }}
+          {{- end }}
+          {{- with .Values.labeler.srBuildWorker.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.labeler.srBuildWorker.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- with .Values.labeler.srBuildWorker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.labeler.srBuildWorker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.srBuildWorker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.srBuildWorker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

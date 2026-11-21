@@ -1,0 +1,32 @@
+{{- if .Values.dashboard.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vision-ai.dashboardBackend.fullname" . }}-config
+  labels:
+    {{- include "vision-ai.dashboardBackend.labels" . | nindent 4 }}
+data:
+  {{- $env := deepCopy .Values.dashboard.backend.env }}
+  {{- if not (get $env "DASHBOARD_USER_SERVICE_API_URL") }}
+  {{- $prefix := default "/user/api/v1" .Values.userService.env.API_V1_PREFIX }}
+  {{- $_ := set $env "DASHBOARD_USER_SERVICE_API_URL" (printf "http://%s.%s.svc.cluster.local:%d%s" (include "vision-ai.userService.fullname" .) .Release.Namespace (.Values.userService.service.port | int) $prefix) }}
+  {{- end }}
+  {{- if not (get $env "DASHBOARD_MCP_URL") }}
+  {{- if not .Values.platform.dashboardMcp.enabled }}
+  {{- fail "dashboard.backend.env.DASHBOARD_MCP_URL is required when the Dashboard MCP service is disabled" }}
+  {{- end }}
+  {{- $_ := set $env "DASHBOARD_MCP_URL" (printf "http://%s:%d%s" (include "vision-ai.dashboardMcp.fullname" .) (.Values.platform.dashboardMcp.service.port | int) .Values.platform.dashboardMcp.basePath) }}
+  {{- end }}
+  {{- range $key, $value := $env }}
+  {{- if kindIs "map" $value }}
+  {{- if or (not (hasKey $value "valueFrom")) (ne (len $value) 1) }}
+  {{- fail (printf "dashboard.backend.env.%s must be a scalar or {valueFrom: {...}}" $key) }}
+  {{- end }}
+  {{- if not (kindIs "map" $value.valueFrom) }}
+  {{- fail (printf "dashboard.backend.env.%s.valueFrom must contain a Kubernetes reference" $key) }}
+  {{- end }}
+  {{- else }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}

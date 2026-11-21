@@ -1,0 +1,75 @@
+{{- $root := . }}
+{{- $workers := .Values.labeler.inferenceWorkers }}
+{{- if and (ne (include "vision-ai.autoLabeling.backendExecution" .) "true") .Values.labeler.enabled (ne (include "vision-ai.consolidation.enabled" .) "true") (or $workers.enabled (eq (include "vision-ai.autoLabeling.enabled" .) "true")) }}
+{{- $baseEnv := include "vision-ai.autoLabeling.labelerEnv" (dict "root" . "env" .Values.labeler.backend.env) | fromYaml }}
+{{- $env := mergeOverwrite $baseEnv $workers.env }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "labeler") | fromYaml }}
+{{- range $phase := list "dispatcher" "control" "prepare" "save" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.labeler.fullname" $root }}-inference-{{ $phase }}
+  labels:
+    {{- include "vision-ai.labeler.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: inference-{{ $phase }}
+spec:
+  replicas: {{ index $workers.replicas $phase }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "vision-ai.labeler.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: inference-{{ $phase }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "vision-ai.labeler.name" $root }}
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+        app.kubernetes.io/component: inference-{{ $phase }}
+    spec:
+      terminationGracePeriodSeconds: 630
+      {{- with $root.Values.labeler.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.labeler.backend.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: inference-schema
+          image: "{{ $root.Values.labeler.backend.image.repository }}:{{ $root.Values.labeler.backend.image.tag }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.inference.schema", "wait"]
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+      containers:
+        - name: inference-{{ $phase }}
+          image: "{{ $root.Values.labeler.backend.image.repository }}:{{ $root.Values.labeler.backend.image.tag }}"
+          command: ["uv", "run", "--no-project", "--no-sync", "python", "-m"]
+          {{- if eq $phase "dispatcher" }}
+          args: ["app.inference.dispatcher"]
+          {{- else }}
+          args: ["app.inference.rq_worker", {{ $phase | quote }}]
+          {{- end }}
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml $workers.resources | nindent 12 }}
+      {{- with $workers.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $workers.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $workers.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,56 @@
+{{- if .Values.platform.mcp.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.mcp.fullname" . }}
+  labels:
+    {{- include "vision-ai.mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.platform.mcp.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vision-ai.mcp.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.platform.mcp.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mcp
+          image: "{{ .Values.platform.mcp.image.repository }}:{{ .Values.platform.mcp.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.platform.mcp.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.platform.mcp.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: TZ
+              value: "UTC"
+            # No PAT here: each request carries the caller's Authorization: Bearer <pat>.
+            - name: DICE_MCP_PORT
+              value: {{ .Values.platform.mcp.service.targetPort | quote }}
+            - name: DICE_MCP_BASE_PATH
+              value: {{ .Values.platform.mcp.basePath | quote }}
+            {{- $env := include "vision-ai.internal.applicationEnv" (dict "root" . "env" .Values.platform.mcp.env) | fromYaml }}
+            {{- range $k, $v := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $k "value" $v) | nindent 12 }}
+            {{- end }}
+          {{- with .Values.platform.mcp.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.platform.mcp.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.platform.mcp.resources | nindent 12 }}
+      {{- with .Values.platform.mcp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

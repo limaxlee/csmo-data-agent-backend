@@ -1,0 +1,41 @@
+{{- if and .Values.platform.dashboardMcp.enabled .Values.platform.dashboardMcp.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "vision-ai.dashboardMcp.fullname" . }}
+  labels:
+    {{- include "vision-ai.dashboardMcp.labels" . | nindent 4 }}
+  {{- with .Values.platform.dashboardMcp.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.platform.dashboardMcp.ingress.className }}
+  ingressClassName: {{ .Values.platform.dashboardMcp.ingress.className }}
+  {{- end }}
+  {{- if .Values.platform.dashboardMcp.ingress.tls }}
+  tls:
+    {{- range .Values.platform.dashboardMcp.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.platform.dashboardMcp.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "vision-ai.dashboardMcp.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

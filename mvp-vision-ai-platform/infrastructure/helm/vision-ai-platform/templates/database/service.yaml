@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.database.fullname" . }}
+  labels:
+    {{- include "vision-ai.database.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.database.postgres.port }}
+      targetPort: {{ .Values.database.postgres.port }}
+      protocol: TCP
+      name: postgres
+  selector:
+    {{- include "vision-ai.database.selectorLabels" . | nindent 4 }}
+{{- end }}

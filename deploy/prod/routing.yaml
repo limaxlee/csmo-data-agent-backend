@@ -1,0 +1,81 @@
+# Forwarding rule for the data agent on the DICE production address.
+#
+#   https://dice.gtrai.sec.samsung.net/data-agent      -> 10.240.35.180:13080 (frontend server)
+#   https://dice.gtrai.sec.samsung.net/data-agent/...  -> 10.240.35.180:13080 (frontend server)
+#
+# The backend (port 18080) is NOT forwarded. The browser only talks to the
+# frontend server, and the frontend server passes backend calls on by itself.
+#
+# This file replaces the two objects that were added by hand in namespace "dice":
+#   VirtualService "data-agent-stage" and ServiceEntry "data-agent-server".
+# Delete those two first, then create the objects below.
+# See docs/data-agent-auth-implementation-2026-11-21.md, Part 1.
+#
+# The login paths (/auth/...) are already forwarded on this address by the
+# defect-studio-prod rule, so they are not repeated here.
+
+# Registers the data agent server (outside the cluster) under an internal name.
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: data-agent-server
+  namespace: dice
+spec:
+  hosts:
+    - data-agent.external.local
+  location: MESH_EXTERNAL
+  resolution: STATIC
+  endpoints:
+    - address: 10.240.35.180
+  ports:
+    - name: http-frontend
+      number: 13080
+      protocol: HTTP
+  # The gateway runs in istio-system and has to see this entry.
+  exportTo:
+    - "."
+    - istio-system
+---
+# Sends the /data-agent paths on the production address to that server.
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: data-agent
+  namespace: dice
+spec:
+  hosts:
+    - dice.gtrai.sec.samsung.net
+  gateways:
+    - istio-system/platform-gateway
+  http:
+    # http -> https (the login cookie is only sent over https)
+    - match:
+        - port: 80
+          uri:
+            prefix: /data-agent
+      redirect:
+        scheme: https
+        port: 443
+        redirectCode: 308
+    # Frontend server. Both spellings are forwarded and neither is redirected
+    # here: the frontend itself redirects /data-agent/ to /data-agent, so a
+    # redirect in the other direction at this point would loop forever.
+    - match:
+        - uri:
+            exact: /data-agent
+        - uri:
+            prefix: /data-agent/
+      # The data agent does not use cookies. Removing them here keeps the DICE
+      # login cookie inside the cluster instead of sending it, unencrypted, to
+      # 10.240.35.180 with every request.
+      # Not yet tried on this cluster: if the cluster refuses this file, delete
+      # the four lines from "headers:" to "- cookie" and apply it again.
+      headers:
+        request:
+          remove:
+            - cookie
+      route:
+        - destination:
+            host: data-agent.external.local
+            port:
+              number: 13080

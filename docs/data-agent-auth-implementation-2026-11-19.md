@@ -1,5 +1,9 @@
 # Data agent authorization: implementation guide
 
+> **Replaced on 2026-11-21 by `data-agent-auth-implementation-2026-11-21.md`.** Do not work from
+> this file. It assumes the stage address, a forwarding rule that has since been found to
+> conflict with the frontend, and a frontend that had not been reviewed. Kept for history only.
+
 Written 2026-11-19.
 
 This document describes everything needed to put login and access control in front of the data

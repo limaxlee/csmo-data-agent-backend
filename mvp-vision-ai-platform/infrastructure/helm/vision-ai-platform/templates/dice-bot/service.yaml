@@ -1,0 +1,18 @@
+{{- if .Values.diceBot.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.diceBot.fullname" . }}
+  labels:
+    {{- include "vision-ai.diceBot.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.diceBot.service.type }}
+  ports:
+    - port: {{ .Values.diceBot.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "vision-ai.diceBot.selectorLabels" . | nindent 4 }}
+{{- end }}
+

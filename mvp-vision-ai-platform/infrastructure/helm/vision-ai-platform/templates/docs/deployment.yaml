@@ -1,0 +1,56 @@
+{{- if .Values.docs.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.docs.fullname" . }}
+  labels:
+    {{- include "vision-ai.docs.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.docs.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.docs.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vision-ai.docs.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.docs.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: docs
+          image: "{{ .Values.docs.image.repository }}:{{ .Values.docs.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.docs.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.docs.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: WEB_AUTH_INTERNAL_URL
+              value: "http://{{ include "vision-ai.webAuth.fullname" . }}:{{ .Values.webAuth.service.port }}/auth"
+          {{- with .Values.docs.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.docs.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.docs.resources | nindent 12 }}
+      {{- with .Values.docs.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.docs.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.docs.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

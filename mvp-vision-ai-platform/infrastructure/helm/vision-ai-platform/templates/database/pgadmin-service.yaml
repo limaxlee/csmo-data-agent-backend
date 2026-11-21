@@ -1,0 +1,17 @@
+{{- if and .Values.database.enabled .Values.database.pgadmin.enabled .Values.database.pgadmin.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.database.pgadmin.service.name | default (printf "%s-pgadmin" (include "vision-ai.database.fullname" .)) }}
+  labels:
+    {{- include "vision-ai.database.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "vision-ai.database.selectorLabels" . | nindent 4 }}
+{{- end }}

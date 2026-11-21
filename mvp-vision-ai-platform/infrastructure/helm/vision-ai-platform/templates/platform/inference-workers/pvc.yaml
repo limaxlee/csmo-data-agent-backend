@@ -1,0 +1,13 @@
+{{- if eq (include "vision-ai.autoLabeling.enabled" .) "true" }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vision-ai.backend.fullname" . }}-inference-cache
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: {{ .Values.autoLabeling.cacheStorageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.autoLabeling.cacheSize }}
+{{- end }}
+

@@ -1,0 +1,21 @@
+{{- if .Values.labeler.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.labeler.fullname" . }}-backend
+  labels:
+    {{- include "vision-ai.labeler.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.labeler.backend.port }}
+      targetPort: {{ .Values.labeler.backend.port }}
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: backend
+
+{{- end }}
+

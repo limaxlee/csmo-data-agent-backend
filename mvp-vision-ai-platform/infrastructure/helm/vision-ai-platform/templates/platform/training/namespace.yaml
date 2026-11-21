@@ -1,0 +1,16 @@
+{{- if .Values.platform.training.enabled -}}
+{{- if .Values.platform.training.namespace }}
+{{- if ne .Values.platform.training.namespace "default" }}
+# Create training namespace if it doesn't exist
+# Note: In production, namespace is usually pre-created by cluster admin
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.platform.training.namespace }}
+  labels:
+    {{- include "vision-ai.training.labels" . | nindent 4 }}
+    purpose: ml-training
+{{- end }}
+{{- end }}
+{{- end }}
+

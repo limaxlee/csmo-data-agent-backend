@@ -1,0 +1,21 @@
+{{- if .Values.webAuth.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vision-ai.webAuth.fullname" . }}-config
+  labels:
+    {{- include "vision-ai.webAuth.labels" . | nindent 4 }}
+data:
+  {{- $env := include "vision-ai.storage.applicationEnv" (dict "root" . "env" .Values.webAuth.env) | fromYaml }}
+  {{- $_ := set $env "DASHBOARD_ENABLED" (.Values.dashboard.enabled | toString) }}
+  {{- if not (get $env "USER_SERVICE_API_URL") }}
+  {{- $prefix := default "/user/api/v1" .Values.userService.env.API_V1_PREFIX }}
+  {{- $_ := set $env "USER_SERVICE_API_URL" (printf "http://%s:%d%s" (include "vision-ai.userService.fullname" .) (.Values.userService.service.port | int) $prefix) }}
+  {{- end }}
+  {{- range $key, $value := $env }}
+  {{- if not (kindIs "map" $value) }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+

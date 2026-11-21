@@ -1,0 +1,454 @@
+{{- if .Values.platform.training.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: training-job-templates
+  namespace: {{ include "vision-ai.training.namespace" . }}
+  labels:
+    {{- include "vision-ai.training.labels" . | nindent 4 }}
+data:
+  # =============================================================================
+  # Base Job Template (Jinja2 syntax)
+  # =============================================================================
+  # This template is rendered by KubernetesTrainingManager with job-specific params.
+  # Variables are injected at runtime: job_name, image, env_vars, etc.
+  # =============================================================================
+  base-job.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: "{{"{{ job_name }}"}}"
+      namespace: "{{"{{ namespace }}"}}"
+      labels:
+        app: vision-ai-trainer
+        managed-by: vision-ai-backend
+        job-id: "{{"{{ job_id }}"}}"
+        job-type: "{{"{{ job_type }}"}}"
+        framework: "{{"{{ framework }}"}}"
+        resource-profile: "{{"{{ resource_profile }}"}}"
+        resolved-resource-profile: "{{"{{ resolved_resource_profile }}"}}"
+        failover-attempt: "{{"{{ attempt_number | default(0) }}"}}"
+    spec:
+      backoffLimit: {{"{{ backoff_limit | default('"}}{{ .Values.platform.training.job.backoffLimit }}{{"') }}"}}
+      ttlSecondsAfterFinished: {{"{{ ttl_seconds | default('"}}{{ .Values.platform.training.job.ttlSecondsAfterFinished }}{{"') }}"}}
+      activeDeadlineSeconds: {{"{{ active_deadline | default('"}}{{ .Values.platform.training.job.activeDeadlineSeconds }}{{"') }}"}}
+      template:
+        metadata:
+          labels:
+            app: vision-ai-trainer
+            job-id: "{{"{{ job_id }}"}}"
+            job-type: "{{"{{ job_type }}"}}"
+            framework: "{{"{{ framework }}"}}"
+            resource-profile: "{{"{{ resource_profile }}"}}"
+            resolved-resource-profile: "{{"{{ resolved_resource_profile }}"}}"
+            failover-attempt: "{{"{{ attempt_number | default(0) }}"}}"
+          annotations:
+            sidecar.istio.io/inject: "{{ .Values.platform.training.istio.inject | default "false" }}"
+            {{"{% if extra_annotations %}"}}
+            {{"{% for key, value in extra_annotations.items() %}"}}
+            {{"{{ key }}"}}: "{{"{{ value }}"}}"
+            {{"{% endfor %}"}}
+            {{"{% endif %}"}}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{"{{ service_account | default('"}}{{ include "vision-ai.training.serviceAccountName" . }}{{"/') }}"}}
+          {{"{% if image_pull_secret %}"}}
+          imagePullSecrets:
+            - name: "{{"{{ image_pull_secret }}"}}"
+          {{"{% endif %}"}}
+          securityContext:
+            fsGroup: {{ .Values.platform.training.podSecurityContext.fsGroup }}
+            fsGroupChangePolicy: "OnRootMismatch"
+          containers:
+            - name: trainer
+              image: "{{"{{ image }}"}}"
+              imagePullPolicy: IfNotPresent
+              {{"{% if working_dir %}"}}
+              workingDir: "{{"{{ working_dir }}"}}"
+              {{"{% endif %}"}}
+              command: {{"{{ command | tojson }}"}}
+              args: {{"{{ args | tojson }}"}}
+              securityContext:
+                runAsNonRoot: {{ .Values.platform.training.securityContext.runAsNonRoot }}
+                runAsUser: {{ .Values.platform.training.securityContext.runAsUser }}
+                runAsGroup: {{ .Values.platform.training.podSecurityContext.fsGroup }}
+                allowPrivilegeEscalation: {{ .Values.platform.training.securityContext.allowPrivilegeEscalation }}
+              env:
+                {{"{% for key, value in env_vars.items() %}"}}
+                - name: "{{"{{ key }}"}}"
+                  value: {{"{{ value | tojson }}"}}
+                {{"{% endfor %}"}}
+                {{"{% for env in extra_env %}"}}
+                - name: "{{"{{ env.name }}"}}"
+                  {{"{% if env.value is defined %}"}}
+                  value: {{"{{ env.value | tojson }}"}}
+                  {{"{% elif env.valueFrom is defined %}"}}
+                  valueFrom: {{"{{ env.valueFrom | tojson }}"}}
+                  {{"{% endif %}"}}
+                {{"{% endfor %}"}}
+              resources:
+                requests:
+                  cpu: "{{"{{ cpu_request | default('"}}{{ .Values.platform.training.resources.defaults.cpu.request }}{{"') }}"}}"
+                  memory: "{{"{{ memory_request | default('"}}{{ .Values.platform.training.resources.defaults.memory.request }}{{"') }}"}}"
+                  {{"{% if gpu_limit and gpu_limit != '0' %}"}}
+                  nvidia.com/gpu: "{{"{{ gpu_limit }}"}}"
+                  {{"{% endif %}"}}
+                limits:
+                  cpu: "{{"{{ cpu_limit | default('"}}{{ .Values.platform.training.resources.defaults.cpu.limit }}{{"') }}"}}"
+                  memory: "{{"{{ memory_limit | default('"}}{{ .Values.platform.training.resources.defaults.memory.limit }}{{"') }}"}}"
+                  {{"{% if gpu_limit and gpu_limit != '0' %}"}}
+                  nvidia.com/gpu: "{{"{{ gpu_limit }}"}}"
+                  {{"{% endif %}"}}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: workspace
+                  mountPath: /workspace
+                - name: dshm
+                  mountPath: /dev/shm
+                {{"{% for vm in extra_volume_mounts %}"}}
+                - name: "{{"{{ vm.name }}"}}"
+                  mountPath: "{{"{{ vm.mountPath }}"}}"
+                  {{"{% if vm.subPath is defined %}"}}
+                  subPath: "{{"{{ vm.subPath }}"}}"
+                  {{"{% endif %}"}}
+                  {{"{% if vm.readOnly is defined %}"}}
+                  readOnly: {{"{{ vm.readOnly | lower }}"}}
+                  {{"{% endif %}"}}
+                {{"{% endfor %}"}}
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: workspace
+              emptyDir: {}
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: "{{"{{ shm_size | default('"}}{{ .Values.platform.training.resources.defaults.shm.size }}{{"') }}"}}"
+            {{"{% for vol in extra_volumes %}"}}
+            - name: "{{"{{ vol.name }}"}}"
+              {{"{% if vol.emptyDir is defined %}"}}
+              emptyDir:
+                {{"{% if vol.emptyDir.sizeLimit is defined %}"}}
+                sizeLimit: "{{"{{ vol.emptyDir.sizeLimit }}"}}"
+                {{"{% endif %}"}}
+              {{"{% elif vol.persistentVolumeClaim is defined %}"}}
+              persistentVolumeClaim:
+                claimName: "{{"{{ vol.persistentVolumeClaim.claimName }}"}}"
+                {{"{% if vol.persistentVolumeClaim.readOnly is defined %}"}}
+                readOnly: {{"{{ vol.persistentVolumeClaim.readOnly | lower }}"}}
+                {{"{% endif %}"}}
+              {{"{% elif vol.configMap is defined %}"}}
+              configMap:
+                name: "{{"{{ vol.configMap.name }}"}}"
+              {{"{% elif vol.secret is defined %}"}}
+              secret:
+                secretName: "{{"{{ vol.secret.secretName }}"}}"
+              {{"{% endif %}"}}
+            {{"{% endfor %}"}}
+          {{"{% if tolerations %}"}}
+          tolerations:
+            {{"{% for t in tolerations %}"}}
+            - key: "{{"{{ t.key }}"}}"
+              operator: "{{"{{ t.operator | default('Equal') }}"}}"
+              {{"{% if t.value is defined %}"}}
+              value: "{{"{{ t.value }}"}}"
+              {{"{% endif %}"}}
+              effect: "{{"{{ t.effect | default('NoSchedule') }}"}}"
+            {{"{% endfor %}"}}
+          {{"{% endif %}"}}
+          {{"{% if node_selector %}"}}
+          nodeSelector: {{"{{ node_selector | tojson }}"}}
+          {{"{% endif %}"}}
+          {{"{% if excluded_node_names %}"}}
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values: {{"{{ excluded_node_names | tojson }}"}}
+          {{"{% endif %}"}}
+
+  # =============================================================================
+  # Dataset Cache Job Template (Jinja2 syntax)
+  # =============================================================================
+  dataset-cache-job.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: "{{"{{ job_name }}"}}"
+      namespace: "{{"{{ namespace }}"}}"
+      labels:
+        app: vision-ai-trainer
+        managed-by: vision-ai-backend
+        job-id: "{{"{{ job_id }}"}}"
+        job-type: dataset-cache
+        framework: "{{"{{ framework }}"}}"
+        dataset-cache-key: "{{"{{ cache_key }}"}}"
+    spec:
+      backoffLimit: {{ .Values.platform.training.datasetCache.job.backoffLimit }}
+      ttlSecondsAfterFinished: {{ .Values.platform.training.datasetCache.job.ttlSecondsAfterFinished }}
+      activeDeadlineSeconds: {{ .Values.platform.training.datasetCache.job.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            app: vision-ai-trainer
+            job-id: "{{"{{ job_id }}"}}"
+            job-type: dataset-cache
+            framework: "{{"{{ framework }}"}}"
+            dataset-cache-key: "{{"{{ cache_key }}"}}"
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          serviceAccountName: "{{"{{ service_account }}"}}"
+          {{"{% if image_pull_secret %}"}}
+          imagePullSecrets:
+            - name: "{{"{{ image_pull_secret }}"}}"
+          {{"{% endif %}"}}
+          securityContext:
+            fsGroup: {{ .Values.platform.training.podSecurityContext.fsGroup }}
+            fsGroupChangePolicy: OnRootMismatch
+          containers:
+            - name: dataset-cache-worker
+              image: "{{"{{ image }}"}}"
+              imagePullPolicy: {{ .Values.platform.training.datasetCache.image.pullPolicy | quote }}
+              command: {{"{{ command | tojson }}"}}
+              args: {{"{{ args | tojson }}"}}
+              securityContext:
+                runAsNonRoot: {{ .Values.platform.training.securityContext.runAsNonRoot }}
+                runAsUser: {{ .Values.platform.training.securityContext.runAsUser }}
+                runAsGroup: {{ .Values.platform.training.podSecurityContext.fsGroup }}
+                allowPrivilegeEscalation: {{ .Values.platform.training.securityContext.allowPrivilegeEscalation }}
+              env:
+                {{"{% for key, value in env_vars.items() %}"}}
+                - name: "{{"{{ key }}"}}"
+                  value: {{"{{ value | tojson }}"}}
+                {{"{% endfor %}"}}
+                {{"{% for env in extra_env %}"}}
+                - name: "{{"{{ env.name }}"}}"
+                  {{"{% if env.value is defined %}"}}
+                  value: {{"{{ env.value | tojson }}"}}
+                  {{"{% elif env.valueFrom is defined %}"}}
+                  valueFrom: {{"{{ env.valueFrom | tojson }}"}}
+                  {{"{% endif %}"}}
+                {{"{% endfor %}"}}
+              resources:
+                {{- toYaml .Values.platform.training.datasetCache.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                {{"{% for vm in extra_volume_mounts %}"}}
+                - name: "{{"{{ vm.name }}"}}"
+                  mountPath: "{{"{{ vm.mountPath }}"}}"
+                  {{"{% if vm.subPath is defined %}"}}
+                  subPath: "{{"{{ vm.subPath }}"}}"
+                  {{"{% endif %}"}}
+                  {{"{% if vm.readOnly is defined %}"}}
+                  readOnly: {{"{{ vm.readOnly | lower }}"}}
+                  {{"{% endif %}"}}
+                {{"{% endfor %}"}}
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            {{"{% for vol in extra_volumes %}"}}
+            - name: "{{"{{ vol.name }}"}}"
+              {{"{% if vol.emptyDir is defined %}"}}
+              emptyDir:
+                {{"{% if vol.emptyDir.sizeLimit is defined %}"}}
+                sizeLimit: "{{"{{ vol.emptyDir.sizeLimit }}"}}"
+                {{"{% endif %}"}}
+              {{"{% elif vol.persistentVolumeClaim is defined %}"}}
+              persistentVolumeClaim:
+                claimName: "{{"{{ vol.persistentVolumeClaim.claimName }}"}}"
+                {{"{% if vol.persistentVolumeClaim.readOnly is defined %}"}}
+                readOnly: {{"{{ vol.persistentVolumeClaim.readOnly | lower }}"}}
+                {{"{% endif %}"}}
+              {{"{% elif vol.configMap is defined %}"}}
+              configMap:
+                name: "{{"{{ vol.configMap.name }}"}}"
+              {{"{% elif vol.secret is defined %}"}}
+              secret:
+                secretName: "{{"{{ vol.secret.secretName }}"}}"
+              {{"{% endif %}"}}
+            {{"{% endfor %}"}}
+
+  # Framework Configurations (per-framework image tag, CI-managed independently)
+  # =============================================================================
+  frameworks.yaml: |
+    # Default settings applied to all frameworks
+    _defaults:
+      registry: "{{ .Values.platform.training.registry.url }}"
+      image_pull_secret: "{{ .Values.platform.training.registry.pullSecret }}"
+      service_account: "{{ include "vision-ai.training.serviceAccountName" . }}"
+      namespace: "{{ include "vision-ai.training.namespace" . }}"
+      gpu_limit: "{{ .Values.platform.training.resources.defaults.gpu.limit }}"
+      cpu_request: "{{ .Values.platform.training.resources.defaults.cpu.request }}"
+      cpu_limit: "{{ .Values.platform.training.resources.defaults.cpu.limit }}"
+      memory_request: "{{ .Values.platform.training.resources.defaults.memory.request }}"
+      memory_limit: "{{ .Values.platform.training.resources.defaults.memory.limit }}"
+      {{- if .Values.platform.training.gpu.nodeSelector }}
+      node_selector:
+        {{- toYaml .Values.platform.training.gpu.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .Values.platform.training.gpu.tolerations }}
+      tolerations:
+        {{- toYaml .Values.platform.training.gpu.tolerations | nindent 8 }}
+      {{- end }}
+      {{- /* Combined extra_env from proxy + storage settings */ -}}
+      {{- $hasProxyEnv := .Values.platform.training.proxy.enabled -}}
+      {{- $hasStorageEnv := or .Values.platform.training.storage.datasets.enabled .Values.platform.training.storage.modelsCache.enabled -}}
+      {{- if or $hasProxyEnv $hasStorageEnv }}
+      extra_env:
+        {{- if .Values.platform.training.proxy.enabled }}
+        # Corporate proxy environment variables
+        - name: HTTP_PROXY
+          value: "{{ .Values.platform.training.proxy.httpProxy }}"
+        - name: HTTPS_PROXY
+          value: "{{ .Values.platform.training.proxy.httpsProxy }}"
+        - name: HF_HTTP_PROXY
+          value: "{{ .Values.platform.training.proxy.httpProxy }}"
+        - name: HF_HTTPS_PROXY
+          value: "{{ .Values.platform.training.proxy.httpsProxy }}"
+        - name: http_proxy
+          value: "{{ .Values.platform.training.proxy.httpProxy }}"
+        - name: https_proxy
+          value: "{{ .Values.platform.training.proxy.httpsProxy }}"
+        - name: NO_PROXY
+          value: "{{ .Values.platform.training.proxy.noProxy }}"
+        - name: no_proxy
+          value: "{{ .Values.platform.training.proxy.noProxy }}"
+        - name: HF_HUB_DISABLE_XET
+          value: '{{ ternary "1" "0" .Values.platform.training.proxy.disableXet }}'
+        {{- if .Values.platform.training.proxy.caCert.enabled }}
+        - name: HF_CA_BUNDLE
+          value: "{{ .Values.platform.training.proxy.caCert.mountPath }}"
+        - name: SSL_CERT_FILE
+          value: "{{ .Values.platform.training.proxy.caCert.mountPath }}"
+        - name: REQUESTS_CA_BUNDLE
+          value: "{{ .Values.platform.training.proxy.caCert.mountPath }}"
+        - name: CURL_CA_BUNDLE
+          value: "{{ .Values.platform.training.proxy.caCert.mountPath }}"
+        - name: NODE_EXTRA_CA_CERTS
+          value: "{{ .Values.platform.training.proxy.caCert.mountPath }}"
+        {{- end }}
+        {{- end }}
+        {{- if .Values.platform.training.storage.datasets.enabled }}
+        # Dataset cache environment variables
+        - name: DATASET_CACHE_DIR
+          value: "{{ .Values.platform.training.storage.datasets.mountPath }}"
+        {{- end }}
+        {{- if .Values.platform.training.storage.modelsCache.enabled }}
+        # Pre-trained model cache paths
+        - name: MODELS_CACHE_DIR
+          value: "{{ .Values.platform.training.storage.modelsCache.mountPath }}"
+        - name: HF_HOME
+          value: "/tmp/huggingface"
+        - name: TRANSFORMERS_CACHE
+          value: "/tmp/huggingface/transformers"
+        - name: TORCH_HOME
+          value: "/tmp/torch"
+        - name: YOLO_CONFIG_DIR
+          value: "/tmp/ultralytics"
+        {{- end }}
+      {{- end }}
+      {{- /* Combined extra_volumes from proxy + storage settings */ -}}
+      {{- $hasProxyVol := and .Values.platform.training.proxy.enabled .Values.platform.training.proxy.caCert.enabled -}}
+      {{- $hasStorageVol := or .Values.platform.training.storage.datasets.enabled .Values.platform.training.storage.modelsCache.enabled -}}
+      {{- if or $hasProxyVol $hasStorageVol }}
+      extra_volumes:
+        {{- if and .Values.platform.training.proxy.enabled .Values.platform.training.proxy.caCert.enabled }}
+        # Corporate CA certificate volume
+        - name: corporate-ca-cert
+          {{- if .Values.platform.training.proxy.caCert.useConfigMap }}
+          configMap:
+            name: "{{ .Values.platform.training.proxy.caCert.configMapName }}"
+          {{- else }}
+          secret:
+            secretName: "{{ .Values.platform.training.proxy.caCert.secretName }}"
+          {{- end }}
+        {{- end }}
+        {{- if .Values.platform.training.storage.datasets.enabled }}
+        - name: datasets-cache
+          persistentVolumeClaim:
+            claimName: "{{ .Values.platform.training.storage.datasets.pvcName }}"
+        {{- end }}
+        {{- if .Values.platform.training.storage.modelsCache.enabled }}
+        - name: models-cache
+          persistentVolumeClaim:
+            claimName: "{{ .Values.platform.training.storage.modelsCache.pvcName }}"
+            readOnly: true
+        {{- end }}
+      {{- end }}
+      {{- /* Combined extra_volume_mounts from proxy + storage settings */ -}}
+      {{- if or $hasProxyVol $hasStorageVol }}
+      extra_volume_mounts:
+        {{- if and .Values.platform.training.proxy.enabled .Values.platform.training.proxy.caCert.enabled }}
+        # Corporate CA certificate mount
+        - name: corporate-ca-cert
+          mountPath: "{{ .Values.platform.training.proxy.caCert.mountPath }}"
+          subPath: "{{ .Values.platform.training.proxy.caCert.key }}"
+          readOnly: true
+        {{- end }}
+        {{- if .Values.platform.training.storage.datasets.enabled }}
+        - name: datasets-cache
+          mountPath: "{{ .Values.platform.training.storage.datasets.mountPath }}"
+          readOnly: true
+        {{- end }}
+        {{- if .Values.platform.training.storage.modelsCache.enabled }}
+        - name: models-cache
+          mountPath: "{{ .Values.platform.training.storage.modelsCache.mountPath }}"
+          readOnly: true
+        {{- end }}
+      {{- end }}
+
+    # Framework-specific configurations
+    {{- range $name, $config := .Values.platform.training.frameworks }}
+    {{- if $config.enabled }}
+    {{ $name }}:
+      {{- if $config.image }}
+      # Full image path (overrides registry + suffix + tag)
+      image: "{{ $config.image }}"
+      {{- else if $config.image_suffix }}
+      image_suffix: "{{ $config.image_suffix }}"
+      {{- if $config.image_tag }}
+      # Per-framework tag override
+      image_tag: "{{ $config.image_tag }}"
+      {{- end }}
+      {{- end }}
+      {{- if $config.space_image }}
+      # SPACE custom image name. The backend still applies platform.training.space.imagePrefix.
+      space_image: "{{ $config.space_image }}"
+      {{- end }}
+      {{- if $config.resources }}
+      {{- if $config.resources.memory }}
+      memory_request: "{{ $config.resources.memory.request | default $.Values.platform.training.resources.defaults.memory.request }}"
+      memory_limit: "{{ $config.resources.memory.limit | default $.Values.platform.training.resources.defaults.memory.limit }}"
+      {{- end }}
+      {{- if $config.resources.cpu }}
+      cpu_request: "{{ $config.resources.cpu.request | default $.Values.platform.training.resources.defaults.cpu.request }}"
+      cpu_limit: "{{ $config.resources.cpu.limit | default $.Values.platform.training.resources.defaults.cpu.limit }}"
+      {{- end }}
+      {{- if $config.resources.gpu }}
+      gpu_limit: "{{ $config.resources.gpu.limit | default $.Values.platform.training.resources.defaults.gpu.limit }}"
+      {{- end }}
+      {{- end }}
+      {{- if $config.extra_env }}
+      extra_env:
+        {{- toYaml $config.extra_env | nindent 8 }}
+      {{- end }}
+      {{- if $config.extra_volumes }}
+      extra_volumes:
+        {{- toYaml $config.extra_volumes | nindent 8 }}
+      {{- end }}
+      {{- if $config.extra_volume_mounts }}
+      extra_volume_mounts:
+        {{- toYaml $config.extra_volume_mounts | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+

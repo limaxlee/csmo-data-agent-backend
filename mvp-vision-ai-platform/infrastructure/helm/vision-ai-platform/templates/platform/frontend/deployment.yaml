@@ -1,0 +1,84 @@
+{{- if .Values.platform.frontend.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.frontend.fullname" . }}
+  labels:
+    {{- include "vision-ai.frontend.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.platform.frontend.autoscaling.enabled }}
+  replicas: {{ .Values.platform.frontend.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.frontend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.platform.frontend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "vision-ai.frontend.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.platform.frontend.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vision-ai.frontend.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.platform.frontend.podSecurityContext | nindent 8 }}
+      containers:
+        - name: frontend
+          securityContext:
+            {{- toYaml .Values.platform.frontend.securityContext | nindent 12 }}
+          image: "{{ .Values.platform.frontend.image.repository }}:{{ .Values.platform.frontend.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.platform.frontend.image.pullPolicy }}
+          {{- with .Values.platform.frontend.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.platform.frontend.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          {{- with .Values.platform.frontend.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.platform.frontend.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: TZ
+              value: "UTC"
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.frontend.fullname" . }}-config
+          resources:
+            {{- toYaml .Values.platform.frontend.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.platform.frontend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.frontend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.platform.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

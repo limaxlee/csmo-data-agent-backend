@@ -1,0 +1,138 @@
+{{- if .Values.labeler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.labeler.fullname" . }}-backend
+  labels:
+    {{- include "vision-ai.labeler.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  {{- if eq (include "vision-ai.consolidation.enabled" .) "true" }}
+  strategy: {type: Recreate}
+  {{- end }}
+  replicas: {{ .Values.labeler.backend.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: backend
+    spec:
+      {{- if eq (include "vision-ai.consolidation.enabled" .) "true" }}
+      terminationGracePeriodSeconds: {{ .Values.workloadConsolidation.terminationGracePeriodSeconds }}
+      {{- end }}
+      {{- with .Values.labeler.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.backend.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if eq (include "vision-ai.autoLabeling.enabled" .) "true" }}
+      {{- $migrationEnv := include "vision-ai.autoLabeling.labelerEnv" (dict "root" . "env" .Values.labeler.backend.env) | fromYaml }}
+      {{- $migrationEnv = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $migrationEnv "database" "labeler") | fromYaml }}
+      initContainers:
+        - name: inference-schema
+          image: "{{ .Values.labeler.backend.image.repository }}:{{ .Values.labeler.backend.image.tag }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.inference.schema", "upgrade"]
+          env:
+            {{- range $key, $value := $migrationEnv }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+      {{- end }}
+      containers:
+        - name: backend
+          image: "{{ .Values.labeler.backend.image.repository }}:{{ .Values.labeler.backend.image.tag }}"
+          {{- with .Values.labeler.backend.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.labeler.backend.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - containerPort: {{ .Values.labeler.backend.port }}
+          env:
+            {{- $baseEnv := include "vision-ai.autoLabeling.labelerEnv" (dict "root" . "env" .Values.labeler.backend.env) | fromYaml }}
+            {{- if eq (include "vision-ai.srBuild.backend" .) "true" }}
+            {{- $_ := set $baseEnv "SUPER_RESOLUTION_BUILD_EXECUTION_MODE" "backend" }}
+            {{- end }}
+            {{- $env := include "vision-ai.redis.applicationEnv" (dict "root" . "env" $baseEnv "database" "labeler") | fromYaml }}
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- with .Values.labeler.backend.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.labeler.backend.startupProbe.path | default "/health" }}
+              port: {{ .Values.labeler.backend.port }}
+            initialDelaySeconds: {{ .Values.labeler.backend.startupProbe.initialDelaySeconds | default 10 }}
+            periodSeconds: {{ .Values.labeler.backend.startupProbe.periodSeconds | default 5 }}
+            timeoutSeconds: {{ .Values.labeler.backend.startupProbe.timeoutSeconds | default 5 }}
+            failureThreshold: {{ .Values.labeler.backend.startupProbe.failureThreshold | default 60 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.labeler.backend.livenessProbe.path | default "/health" }}
+              port: {{ .Values.labeler.backend.port }}
+            initialDelaySeconds: {{ .Values.labeler.backend.livenessProbe.initialDelaySeconds | default 30 }}
+            periodSeconds: {{ .Values.labeler.backend.livenessProbe.periodSeconds | default 30 }}
+            timeoutSeconds: {{ .Values.labeler.backend.livenessProbe.timeoutSeconds | default 5 }}
+            failureThreshold: {{ .Values.labeler.backend.livenessProbe.failureThreshold | default 5 }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.labeler.backend.readinessProbe.path | default "/health" }}
+              port: {{ .Values.labeler.backend.port }}
+            initialDelaySeconds: {{ .Values.labeler.backend.readinessProbe.initialDelaySeconds | default 10 }}
+            periodSeconds: {{ .Values.labeler.backend.readinessProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ .Values.labeler.backend.readinessProbe.timeoutSeconds | default 5 }}
+            failureThreshold: {{ .Values.labeler.backend.readinessProbe.failureThreshold | default 6 }}
+
+      {{- if eq (include "vision-ai.consolidation.enabled" .) "true" }}
+      {{- range $key, $name := dict "importWorker" "import-worker" "bulkWorker" "bulk-worker" "publishWorker" "publish-worker" "srBuildWorker" "sr-build-worker" }}
+      {{- $worker := index $.Values.labeler $key }}
+      {{- if and $worker.enabled (not (and (eq $key "srBuildWorker") (eq (include "vision-ai.srBuild.backend" $) "true"))) }}
+      {{- if ne (int $worker.replicas) (int $.Values.labeler.backend.replicas) }}
+      {{- fail (printf "Consolidated %s replicas must match labeler.backend.replicas" $key) }}
+      {{- end }}
+      {{- if or $worker.nodeSelector $worker.affinity $worker.tolerations }}
+      {{- fail (printf "Consolidated %s scheduling must be configured on labeler.backend" $key) }}
+      {{- end }}
+      {{- $ctx := default $.Values.labeler.backend.securityContext $worker.securityContext }}
+      {{- range $field := list "fsGroup" "fsGroupChangePolicy" "supplementalGroups" "sysctls" }}
+      {{- if ne (toJson (index $ctx $field)) (toJson (index $.Values.labeler.backend.securityContext $field)) }}
+      {{- fail (printf "Consolidated %s pod security field %s must match labeler.backend" $key $field) }}
+      {{- end }}
+      {{- end }}
+      {{- if not (has $key (list "bulkWorker" "publishWorker")) }}
+      {{- include "vision-ai.consolidation.worker" (dict "root" $ "worker" $worker "name" $name) | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- if eq (include "vision-ai.consolidation.enabled" .) "true" }}
+      {{- include "vision-ai.consolidation.operations" . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.backend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

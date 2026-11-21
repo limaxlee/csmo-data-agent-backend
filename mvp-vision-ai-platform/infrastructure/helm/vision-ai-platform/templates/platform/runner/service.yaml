@@ -1,0 +1,19 @@
+{{- if .Values.platform.runner.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.runner.fullname" . }}
+  labels:
+    {{- include "vision-ai.runner.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.platform.runner.service.type }}
+  ports:
+    # Unified single-port bind: inference + management + metrics + console all
+    # served here under base_path/api (see runner config unified_address).
+    - name: inference
+      port: {{ .Values.platform.runner.service.inferencePort }}
+      targetPort: inference
+      protocol: TCP
+  selector:
+    {{- include "vision-ai.runner.selectorLabels" . | nindent 4 }}
+{{- end }}

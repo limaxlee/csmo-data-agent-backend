@@ -1,0 +1,55 @@
+{{- if .Values.platform.dashboardMcp.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.dashboardMcp.fullname" . }}
+  labels:
+    {{- include "vision-ai.dashboardMcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.platform.dashboardMcp.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.dashboardMcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vision-ai.dashboardMcp.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.platform.dashboardMcp.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dashboard-mcp
+          image: "{{ .Values.platform.dashboardMcp.image.repository }}:{{ .Values.platform.dashboardMcp.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.platform.dashboardMcp.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.platform.dashboardMcp.service.targetPort }}
+              protocol: TCP
+          env:
+            # No PAT here: each request carries the caller's Authorization: Bearer <pat>.
+            - name: DICE_DASHBOARD_MCP_PORT
+              value: {{ .Values.platform.dashboardMcp.service.targetPort | quote }}
+            - name: DICE_DASHBOARD_MCP_BASE_PATH
+              value: {{ .Values.platform.dashboardMcp.basePath | quote }}
+            {{- $env := include "vision-ai.internal.applicationEnv" (dict "root" . "env" .Values.platform.dashboardMcp.env) | fromYaml }}
+            {{- range $k, $v := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $k "value" $v) | nindent 12 }}
+            {{- end }}
+          {{- with .Values.platform.dashboardMcp.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.platform.dashboardMcp.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.platform.dashboardMcp.resources | nindent 12 }}
+      {{- with .Values.platform.dashboardMcp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

@@ -1,0 +1,129 @@
+{{- if .Values.database.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.database.fullname" . }}
+  labels:
+    {{- include "vision-ai.database.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "vision-ai.database.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vision-ai.database.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.database.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.database.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.database.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.database.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgres
+          image: "{{ .Values.database.postgres.image.repository }}:{{ .Values.database.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.database.postgres.image.pullPolicy }}
+          args: ["-c", "max_connections={{ .Values.database.postgres.maxConnections }}"]
+          env:
+            - name: TZ
+              value: Asia/Seoul
+            - name: POSTGRES_USER
+              value: {{ .Values.database.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              {{- with .Values.database.postgres.passwordSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "database.postgres.passwordSecret.name is required" .name | quote }}
+                  key: {{ required "database.postgres.passwordSecret.key is required" .key | quote }}
+              {{- else }}
+              value: {{ .Values.database.postgres.password | quote }}
+              {{- end }}
+            {{- with .Values.database.postgres.initialDatabase }}
+            - name: POSTGRES_DB
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.database.postgres.port }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            {{- if .Values.database.postgres.initDatabases }}
+            - name: init-databases
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            {{- end }}
+          {{- with .Values.database.resources.postgres }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if .Values.database.pgadmin.enabled }}
+        - name: pgadmin4
+          image: "{{ .Values.database.pgadmin.image.repository }}:{{ .Values.database.pgadmin.image.tag }}"
+          imagePullPolicy: {{ .Values.database.pgadmin.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            - name: TZ
+              value: Asia/Seoul
+            - name: PGADMIN_DEFAULT_EMAIL
+              value: {{ .Values.database.pgadmin.defaultEmail | quote }}
+            - name: PGADMIN_DEFAULT_PASSWORD
+              {{- with .Values.database.pgadmin.defaultPasswordSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "database.pgadmin.defaultPasswordSecret.name is required" .name | quote }}
+                  key: {{ required "database.pgadmin.defaultPasswordSecret.key is required" .key | quote }}
+              {{- else }}
+              value: {{ .Values.database.pgadmin.defaultPassword | quote }}
+              {{- end }}
+            - name: SCRIPT_NAME
+              value: /dev/pgadmin
+            - name: PGADMIN_CONFIG_X_CONTENT_TYPE_OPTIONS
+              value: '""'
+            - name: PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION
+              value: "False"
+            - name: PGADMIN_CONFIG_X_XSS_PROTECTION
+              value: "0"
+            - name: PGADMIN_CONFIG_WTF_CSRF_CHECK_DEFAULT
+              value: "False"
+            - name: PGADMIN_CONFIG_WTF_CSRF_ENABLED
+              value: {{ ternary "True" "False" .Values.database.pgadmin.csrfEnabled | quote }}
+          volumeMounts:
+            - name: pgadmin
+              mountPath: /var/lib/pgadmin
+          {{- with .Values.database.resources.pgadmin }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.database.dataVolume.existingClaim | default (printf "%s-data" (include "vision-ai.database.fullname" .)) }}
+        {{- if .Values.database.pgadmin.enabled }}
+        - name: pgadmin
+          persistentVolumeClaim:
+            claimName: {{ .Values.database.pgadminVolume.existingClaim | default (printf "%s-pgadmin" (include "vision-ai.database.fullname" .)) }}
+        {{- end }}
+        {{- if .Values.database.postgres.initDatabases }}
+        - name: init-databases
+          configMap:
+            name: {{ include "vision-ai.database.fullname" . }}-init
+        {{- end }}
+{{- end }}

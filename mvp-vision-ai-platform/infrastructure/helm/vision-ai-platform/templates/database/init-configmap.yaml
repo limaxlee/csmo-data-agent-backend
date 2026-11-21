@@ -1,0 +1,19 @@
+{{- if and .Values.database.enabled .Values.database.postgres.initDatabases }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vision-ai.database.fullname" . }}-init
+  labels:
+    {{- include "vision-ai.database.labels" . | nindent 4 }}
+data:
+  # Official postgres image runs this ONLY on first initialization of an empty
+  # volume. Never use this as a migration or as a production data-copy mechanism.
+  10-create-databases.sql: |
+    {{- range .Values.database.postgres.initDatabases }}
+    {{- if or (not (kindIs "string" .)) (not (regexMatch "^[a-zA-Z_][a-zA-Z0-9_]{0,62}$" .)) }}
+    {{- fail "database.postgres.initDatabases entries must be SQL identifiers (letters/digits/underscore, max 63 chars)" }}
+    {{- end }}
+    SELECT format('CREATE DATABASE %I', '{{ . }}')
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ . }}') \gexec
+    {{- end }}
+{{- end }}

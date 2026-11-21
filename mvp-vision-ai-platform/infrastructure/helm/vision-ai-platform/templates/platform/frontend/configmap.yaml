@@ -1,0 +1,13 @@
+{{- if .Values.platform.frontend.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vision-ai.frontend.fullname" . }}-config
+  labels:
+    {{- include "vision-ai.frontend.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.platform.frontend.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}
+

@@ -1,0 +1,40 @@
+{{- if and .Values.platform.training.enabled .Values.platform.training.rbac.create -}}
+# Role for training jobs - minimal permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "vision-ai.training.fullname" . }}-job-role
+  namespace: {{ include "vision-ai.training.namespace" . }}
+  labels:
+    {{- include "vision-ai.training.labels" . | nindent 4 }}
+rules:
+  # Training jobs need to read configmaps for configuration
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  # Training jobs need to read secrets for credentials
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  # Allow jobs to emit events for status reporting
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "vision-ai.training.fullname" . }}-job-rolebinding
+  namespace: {{ include "vision-ai.training.namespace" . }}
+  labels:
+    {{- include "vision-ai.training.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "vision-ai.training.fullname" . }}-job-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vision-ai.training.serviceAccountName" . }}
+    namespace: {{ include "vision-ai.training.namespace" . }}
+{{- end }}
+

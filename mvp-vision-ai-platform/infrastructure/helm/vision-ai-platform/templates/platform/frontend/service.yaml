@@ -1,0 +1,17 @@
+{{- if .Values.platform.frontend.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.frontend.fullname" . }}
+  labels:
+    {{- include "vision-ai.frontend.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.platform.frontend.service.type }}
+  ports:
+    - port: {{ .Values.platform.frontend.service.port }}
+      targetPort: {{ .Values.platform.frontend.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "vision-ai.frontend.selectorLabels" . | nindent 4 }}
+{{- end }}

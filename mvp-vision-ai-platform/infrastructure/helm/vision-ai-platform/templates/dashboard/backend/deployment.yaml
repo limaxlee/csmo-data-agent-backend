@@ -1,0 +1,70 @@
+{{- if .Values.dashboard.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.dashboardBackend.fullname" . }}
+  labels:
+    {{- include "vision-ai.dashboardBackend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dashboard.backend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.dashboardBackend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/dashboard/backend/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "vision-ai.dashboardBackend.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.dashboard.backend.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dashboard-backend
+          image: "{{ .Values.dashboard.backend.image.repository }}:{{ .Values.dashboard.backend.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.dashboard.backend.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: {{ .Values.dashboard.backend.service.targetPort }}
+              protocol: TCP
+          {{- $env := deepCopy .Values.dashboard.backend.env }}
+          {{- $secretEnv := dict }}
+          {{- range $key, $value := $env }}
+          {{- if kindIs "map" $value }}
+          {{- $_ := set $secretEnv $key $value }}
+          {{- end }}
+          {{- end }}
+          {{- if $secretEnv }}
+          env:
+            {{- range $key, $value := $secretEnv }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.dashboardBackend.fullname" . }}-config
+          {{- with .Values.dashboard.backend.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.dashboard.backend.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.dashboard.backend.resources | nindent 12 }}
+      {{- with .Values.dashboard.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

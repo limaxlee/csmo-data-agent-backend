@@ -1,0 +1,33 @@
+{{- if and .Values.platform.backend.enabled .Values.platform.backend.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "vision-ai.backend.fullname" . }}
+  labels:
+    {{- include "vision-ai.backend.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "vision-ai.backend.fullname" . }}
+  minReplicas: {{ .Values.platform.backend.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.platform.backend.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.platform.backend.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.platform.backend.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.platform.backend.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.platform.backend.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+

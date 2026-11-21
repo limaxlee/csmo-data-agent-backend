@@ -1,0 +1,91 @@
+{{- if .Values.webAuth.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.webAuth.fullname" . }}
+  labels:
+    {{- include "vision-ai.webAuth.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.webAuth.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.webAuth.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/web-auth/configmap.yaml") . | sha256sum }}
+        {{- with .Values.webAuth.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "vision-ai.webAuth.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.webAuth.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vision-ai.webAuth.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.webAuth.podSecurityContext | nindent 8 }}
+      containers:
+        - name: web-auth
+          securityContext:
+            {{- toYaml .Values.webAuth.securityContext | nindent 12 }}
+          image: "{{ .Values.webAuth.image.repository }}:{{ .Values.webAuth.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.webAuth.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.webAuth.service.targetPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.webAuth.fullname" . }}-config
+          {{- $env := include "vision-ai.storage.applicationEnv" (dict "root" . "env" .Values.webAuth.env) | fromYaml }}
+          {{- $refs := dict }}
+          {{- range $key, $value := $env }}
+          {{- if kindIs "map" $value }}
+          {{- $_ := set $refs $key $value }}
+          {{- end }}
+          {{- end }}
+          env:
+            - name: TZ
+              value: "UTC"
+            {{- if or .Values.webAuth.secretEnv $refs }}
+            {{- range .Values.webAuth.secretEnv }}
+            {{- if hasKey $refs .name }}
+            {{- fail (printf "webAuth.env.%s and webAuth.secretEnv both supply a reference" .name) }}
+            {{- end }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName | quote }}
+                  key: {{ .secretKey | quote }}
+            {{- end }}
+            {{- range $key, $value := $refs }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.webAuth.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.webAuth.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.webAuth.resources | nindent 12 }}
+      {{- with .Values.webAuth.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webAuth.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webAuth.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

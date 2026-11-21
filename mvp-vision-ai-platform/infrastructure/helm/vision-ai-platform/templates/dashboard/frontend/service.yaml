@@ -1,0 +1,17 @@
+{{- if .Values.dashboard.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.dashboardFrontend.fullname" . }}
+  labels:
+    {{- include "vision-ai.dashboardFrontend.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.dashboard.frontend.service.type }}
+  ports:
+    - port: {{ .Values.dashboard.frontend.service.port }}
+      targetPort: {{ .Values.dashboard.frontend.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "vision-ai.dashboardFrontend.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -1,0 +1,17 @@
+{{- if .Values.webAuth.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.webAuth.fullname" . }}
+  labels:
+    {{- include "vision-ai.webAuth.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.webAuth.service.type }}
+  ports:
+    - port: {{ .Values.webAuth.service.port }}
+      targetPort: {{ .Values.webAuth.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "vision-ai.webAuth.selectorLabels" . | nindent 4 }}
+{{- end }}

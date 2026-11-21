@@ -2,7 +2,7 @@ import os
 import yaml
 import argparse
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings
 
 from common.constants import ROOT_DIR
@@ -31,6 +31,9 @@ _ENV_MAP = {
     "TITLE_MODEL_OPENAPI_CLIENT_KEY": ("title_model_openapi.client_key", str),
     "TITLE_MODEL_OPENAPI_PASS_KEY": ("title_model_openapi.pass_key", str),
     "TITLE_MODEL_OPENAPI_MODEL_ID": ("title_model_openapi.model_id", int),
+    "AUTH_SERVICE_JWT_SECRET": ("auth.service_jwt_secret", str),
+    "AUTH_SERVICE_JWT_ISSUER": ("auth.service_jwt_issuer", str),
+    "AUTH_SERVICE_JWT_AUDIENCE": ("auth.service_jwt_audience", str),
 }
 
 
@@ -103,8 +106,23 @@ class ModelOpenAPI(BaseModel):
     model_id: int
 
 
+class AuthConfig(BaseModel):
+    service_jwt_secret: str
+    service_jwt_issuer: str = "web-auth"
+    service_jwt_audience: str = "dice-backend"
+
+    @field_validator("service_jwt_secret")
+    @classmethod
+    def validate_service_jwt_secret(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Service JWT secret is empty: set auth.service_jwt_secret or AUTH_SERVICE_JWT_SECRET")
+
+        return value
+
+
 class Settings(BaseSettings, extra="allow"):
     server_port: int
+    cors_origins: list[str] = []
 
     mongodb_mcp: MCPConfig
     milvus_mcp: MCPConfig
@@ -113,6 +131,8 @@ class Settings(BaseSettings, extra="allow"):
     object_storage: ObjectStorageConfig
     root_model_openapi: ModelOpenAPI
     title_model_openapi: ModelOpenAPI
+
+    auth: AuthConfig
 
 
 SETTINGS = Settings(**load_config())

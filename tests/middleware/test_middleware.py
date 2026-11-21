@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette import status
 
+from common.config import SETTINGS
 from data_agent.middleware import register_middleware
 
 
@@ -17,7 +18,26 @@ class TestRegisterMiddleware:
 
         return TestClient(app)
 
-    def test_allows_cross_origin_requests(self):
+    def test_rejects_cross_origin_requests_by_default(self):
+        assert SETTINGS.cors_origins == []
+
+        client = self.build_mock_client()
+
+        response = client.options(
+            "/ping",
+            headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"}
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert "access-control-allow-origin" not in response.headers
+
+        response = client.get("/ping", headers={"Origin": "http://localhost:3000"})
+
+        assert response.status_code == status.HTTP_200_OK
+        assert "access-control-allow-origin" not in response.headers
+
+    def test_allows_configured_cross_origin_requests(self, mocker):
+        mocker.patch.object(SETTINGS, "cors_origins", ["http://localhost:3000"])
         client = self.build_mock_client()
 
         response = client.options(
@@ -33,7 +53,12 @@ class TestRegisterMiddleware:
         response = client.get("/ping", headers={"Origin": "http://localhost:3000"})
 
         assert response.status_code == status.HTTP_200_OK
-        assert "access-control-allow-origin" in response.headers
+        assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+        response = client.get("/ping", headers={"Origin": "http://another.host:3000"})
+
+        assert response.status_code == status.HTTP_200_OK
+        assert "access-control-allow-origin" not in response.headers
 
     def test_logs_requests(self, caplog):
         client = self.build_mock_client()

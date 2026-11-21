@@ -5,10 +5,13 @@ from datetime import datetime, timezone
 from starlette import status
 
 from common.constants import RunState
+from data_agent.exceptions import register_exception_handlers
 from data_agent.routers.agent import get_agent_runner, router
+from data_agent.routers.dependencies import get_token_verifier, get_user_manager, require_session_owner
 from data_agent.schemas import (
-    CreateSessionResponse, ListSessionsResponse, LoadSessionArtifactResponse, 
-    GetRunStateResponse, CreateSessionTitleResponse, RunAgentResponse, SessionInfo
+    CreateSessionResponse, ListSessionsResponse, LoadSessionArtifactResponse,
+    GetRunStateResponse, CreateSessionTitleResponse, RunAgentResponse, SessionInfo,
+    SsoIdentity, UserInfo
 )
 
 
@@ -33,6 +36,7 @@ class TestAgentRoutes:
         app = FastAPI()
         app.include_router(router)
         app.dependency_overrides[get_agent_runner] = lambda: agent_runner
+        app.dependency_overrides[require_session_owner] = lambda: None
         return TestClient(app)
 
     def test_get_agent_runner(self, mocker):
@@ -41,6 +45,50 @@ class TestAgentRoutes:
         request.app.state.agent_runner = runner
 
         assert get_agent_runner(request) is runner
+
+    def test_requires_session_owner(self, mocker, agent_runner):
+        token_verifier = mocker.MagicMock()
+        token_verifier.verify = mocker.MagicMock(return_value=SsoIdentity(user_id="user-1"))
+
+        user_manager = mocker.MagicMock()
+        user_manager.authorize = mocker.AsyncMock(return_value=UserInfo(
+            user_id="user-1",
+            is_active=True,
+            created_at=datetime(2026, 10, 20, 10, 15, tzinfo=timezone.utc)
+        ))
+
+        agent_runner.list_sessions = mocker.AsyncMock(return_value=ListSessionsResponse(sessions=[]))
+        agent_runner.run = mocker.AsyncMock()
+
+        app = FastAPI()
+        app.include_router(router)
+        register_exception_handlers(app)
+        app.dependency_overrides[get_agent_runner] = lambda: agent_runner
+        app.dependency_overrides[get_token_verifier] = lambda: token_verifier
+        app.dependency_overrides[get_user_manager] = lambda: user_manager
+        client = TestClient(app)
+        headers = {"Authorization": "Bearer token-1"}
+
+        response = client.get("/apps/users/user-1/sessions")
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert response.json()["code"] == "invalid_token"
+
+        response = client.get("/apps/users/user-2/sessions", headers=headers)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.json()["code"] == "user_mismatch"
+
+        response = client.post("/apps/users/user-2/sessions/session-1/run?query=Hello", headers=headers)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        agent_runner.list_sessions.assert_not_awaited()
+        agent_runner.run.assert_not_awaited()
+
+        response = client.get("/apps/users/user-1/sessions", headers=headers)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert agent_runner.list_sessions.await_args.kwargs["user_id"] == "user-1"
 
     def test_create_session(self, mocker, client, agent_runner):
         agent_runner.create_session = mocker.AsyncMock(return_value=CreateSessionResponse(session_id="session-1"))

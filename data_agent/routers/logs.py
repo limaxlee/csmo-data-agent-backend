@@ -1,13 +1,14 @@
 import os
 import datetime
-from fastapi import APIRouter, status, HTTPException
+from fastapi import APIRouter, status, HTTPException, Depends
 from fastapi.responses import Response
 
 from common.constants import ROOT_DIR
+from data_agent.routers.dependencies import require_admin
 from data_agent.utils import get_logs_zip_file
 
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
-router = APIRouter(tags=["logs"])
+router = APIRouter(tags=["logs"], dependencies=[Depends(require_admin)])
 
 
 @router.get("/logs", response_class=Response, status_code=status.HTTP_200_OK)

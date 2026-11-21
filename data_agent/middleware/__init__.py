@@ -1,13 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from common.config import SETTINGS
 from .logging import log_requests
 
 
 def register_middleware(app: FastAPI) -> None:
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=SETTINGS.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

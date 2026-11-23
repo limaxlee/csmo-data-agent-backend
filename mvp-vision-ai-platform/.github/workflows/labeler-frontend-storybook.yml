@@ -1,0 +1,212 @@
+name: Labeler Frontend Storybook
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/labeler-frontend-storybook.yml'
+      - 'labeler/frontend/apps/storybook/**'
+      - 'labeler/frontend/packages/**'
+      - 'labeler/frontend/package.json'
+      - 'labeler/frontend/pnpm-lock.yaml'
+      - 'labeler/frontend/pnpm-workspace.yaml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the Storybook build to object storage'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labeler-frontend-storybook-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+  STORYBOOK_DIST: labeler/frontend/apps/storybook/storybook-static
+  STORYBOOK_PUBLIC_BASE_URL: ${{ vars.STORYBOOK_PUBLIC_BASE_URL || '' }}
+  STORYBOOK_PUBLISH_ENABLED: ${{ vars.ENABLE_STORYBOOK_PUBLISH || 'false' }}
+  STORYBOOK_STORAGE_BUCKET: ${{ vars.STORYBOOK_STORAGE_BUCKET || secrets.STORYBOOK_STORAGE_BUCKET || vars.EXTERNAL_BUCKET_DATASETS || secrets.EXTERNAL_BUCKET_DATASETS }}
+  STORYBOOK_STORAGE_ENDPOINT: ${{ vars.STORYBOOK_STORAGE_ENDPOINT || secrets.STORYBOOK_STORAGE_ENDPOINT || vars.EXTERNAL_STORAGE_ENDPOINT || secrets.EXTERNAL_STORAGE_ENDPOINT }}
+  STORYBOOK_STORAGE_NO_VERIFY_SSL: ${{ vars.STORYBOOK_STORAGE_NO_VERIFY_SSL || vars.EXTERNAL_STORAGE_NO_VERIFY_SSL || 'false' }}
+  STORYBOOK_STORAGE_PREFIX: ${{ vars.STORYBOOK_STORAGE_PREFIX || 'storybook/labeler-frontend' }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.STORYBOOK_STORAGE_ACCESS_KEY || secrets.EXTERNAL_STORAGE_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.STORYBOOK_STORAGE_SECRET_KEY || secrets.EXTERNAL_STORAGE_SECRET_KEY }}
+  AWS_DEFAULT_REGION: ${{ vars.STORYBOOK_STORAGE_REGION || vars.EXTERNAL_STORAGE_REGION || 'us-east-1' }}
+  AWS_EC2_METADATA_DISABLED: 'true'
+
+jobs:
+  build:
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Setup Node
+        uses: code-actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Prepare pnpm
+        working-directory: labeler/frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          node -e "const major = Number(process.versions.node.split('.')[0]); if (major < 20 || major >= 24) { throw new Error('Storybook requires Node >=20 <24 on this workflow'); }"
+          if ! command -v pnpm >/dev/null 2>&1; then
+            corepack enable
+            corepack prepare pnpm@10.11.0 --activate
+          fi
+          pnpm --version
+
+      - name: Install dependencies
+        working-directory: labeler/frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Select preview path
+        id: preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PREVIEW_PATH="pr-${{ github.event.pull_request.number }}"
+          else
+            PREVIEW_PATH="manual-${{ github.run_number }}"
+          fi
+          echo "path=$PREVIEW_PATH" >> "$GITHUB_OUTPUT"
+          echo "Preview path: $PREVIEW_PATH"
+
+      - name: Build Storybook
+        working-directory: labeler/frontend
+        run: pnpm --filter dice-storybook run build-storybook
+
+      - name: Upload Storybook artifact
+        if: success()
+        uses: CODE-Actions/upload-artifact@v2
+        with:
+          name: labeler-frontend-storybook-${{ steps.preview.outputs.path }}
+          path: ${{ env.STORYBOOK_DIST }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish Storybook preview
+        id: publish
+        if: env.STORYBOOK_PUBLISH_ENABLED == 'true' && (github.event_name == 'pull_request' || github.event.inputs.publish == 'true')
+        shell: bash
+        env:
+          STORYBOOK_PUBLISH_PREFIX: ${{ env.STORYBOOK_STORAGE_PREFIX }}/${{ steps.preview.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          MISSING=()
+          for NAME in STORYBOOK_STORAGE_BUCKET STORYBOOK_PUBLISH_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            if [ -z "${!NAME:-}" ]; then
+              MISSING+=("$NAME")
+            fi
+          done
+          if [ "${#MISSING[@]}" -ne 0 ]; then
+            printf '::error::%s is not configured\n' "${MISSING[@]}"
+            exit 1
+          fi
+
+          python3 - <<'PY' || python3 -m pip install --user --upgrade boto3 botocore
+          import boto3
+          import botocore
+          PY
+
+          python3 - <<'PY'
+          import mimetypes
+          import os
+          from pathlib import Path
+
+          import boto3
+          from botocore.client import Config
+
+          source = Path(os.environ["STORYBOOK_DIST"])
+          bucket = os.environ["STORYBOOK_STORAGE_BUCKET"]
+          prefix = os.environ["STORYBOOK_PUBLISH_PREFIX"].strip("/")
+          endpoint = os.getenv("STORYBOOK_STORAGE_ENDPOINT") or None
+          no_verify = os.getenv("STORYBOOK_STORAGE_NO_VERIFY_SSL", "").lower() in {"1", "true", "yes", "on"}
+
+          if not source.is_dir():
+            raise SystemExit(f"Storybook output not found: {source}")
+          if not prefix:
+            raise SystemExit("STORYBOOK_PUBLISH_PREFIX resolved to an empty value")
+
+          client_args = {
+            "aws_access_key_id": os.environ["AWS_ACCESS_KEY_ID"],
+            "aws_secret_access_key": os.environ["AWS_SECRET_ACCESS_KEY"],
+            "region_name": os.getenv("AWS_DEFAULT_REGION") or "us-east-1",
+            "config": Config(signature_version="s3v4"),
+          }
+          if endpoint:
+            client_args["endpoint_url"] = endpoint
+          if no_verify:
+            client_args["verify"] = False
+
+          client = boto3.client("s3", **client_args)
+          published_keys = set()
+
+          for file_path in source.rglob("*"):
+            if not file_path.is_file():
+              continue
+            relative = file_path.relative_to(source).as_posix()
+            key = f"{prefix}/{relative}"
+            content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+            cache_control = "no-store" if file_path.name == "index.html" else "public, max-age=31536000, immutable"
+            client.upload_file(
+              str(file_path),
+              bucket,
+              key,
+              ExtraArgs={"CacheControl": cache_control, "ContentType": content_type},
+            )
+            published_keys.add(key)
+
+          token = None
+          while True:
+            request = {"Bucket": bucket, "Prefix": f"{prefix}/"}
+            if token:
+              request["ContinuationToken"] = token
+            response = client.list_objects_v2(**request)
+            stale = [{"Key": item["Key"]} for item in response.get("Contents", []) if item["Key"] not in published_keys]
+            for index in range(0, len(stale), 1000):
+              client.delete_objects(Bucket=bucket, Delete={"Objects": stale[index:index + 1000]})
+            if not response.get("IsTruncated"):
+              break
+            token = response.get("NextContinuationToken")
+
+          print(f"Published {len(published_keys)} files to s3://{bucket}/{prefix}/")
+          PY
+
+          echo "target=s3://${STORYBOOK_STORAGE_BUCKET}/${STORYBOOK_PUBLISH_PREFIX}/" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Labeler Frontend Storybook"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Trigger | ${{ github.event_name }} |"
+            echo "| Node | \`$(node --version 2>/dev/null || echo unavailable)\` |"
+            echo "| Preview path | \`${{ steps.preview.outputs.path || 'n/a' }}\` |"
+            echo "| Publish enabled | \`${STORYBOOK_PUBLISH_ENABLED}\` |"
+            echo "| Published target | \`${{ steps.publish.outputs.target || 'not published' }}\` |"
+            if [ -n "${STORYBOOK_PUBLIC_BASE_URL:-}" ] && [ -n "${{ steps.preview.outputs.path }}" ]; then
+              echo "| Preview URL | \`${STORYBOOK_PUBLIC_BASE_URL%/}/${{ steps.preview.outputs.path }}/\` |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

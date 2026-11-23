@@ -1,0 +1,1584 @@
+name: Publish Internal
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/helm-publish-internal.yaml'
+      - 'dashboard/**'
+      - 'web-auth/**'
+      - 'docs-site/**'
+      - 'platform/backend/**'
+      - 'platform/agent-backend/**'
+      - 'platform/frontend/**'
+      - 'dashboard/mcp-server/**'
+      - 'platform/mcp-server/**'
+      - 'platform/dice-agent-core/**'
+      - 'platform/dice-platform-runtime/**'
+      - 'platform/dice-dataset-cache/**'
+      - 'platform/trainers/**'
+      - 'platform/scripts/pack_runner_env.sh'
+      - 'platform/scripts/upload_runner_env_bundle.py'
+      - 'docs/runner/**'
+      - 'runner/**'
+      - 'infrastructure/helm/vision-ai-platform/**'
+      - 'infrastructure/helm/environments/stage-shared-inference.json'
+      - 'infrastructure/scripts/configure-stage-shared-inference.sh'
+      - 'labeler/backend/**'
+      - 'labeler/inference-gateway/**'
+      - 'labeler/frontend/**'
+      - 'dice-bot/**'
+      - 'user-service/**'
+  workflow_dispatch:
+    inputs:
+      components:
+        description: 'Components to build (all, web-auth, docs, backend, frontend, dashboard, mcp, dashboard-mcp, trainers, dataset-cache, runner, labeler, labeler-backend, labeler-frontend, inference-gateway, dice-bot, user-service, chart)'
+        required: false
+        default: 'backend,frontend'
+        type: string
+      tag_override:
+        description: 'Override image tag (leave empty for CalVer)'
+        required: false
+        type: string
+      candidate_upload_enabled:
+        description: 'Enable candidate upload in a staging-only Labeler frontend image'
+        required: false
+        type: boolean
+        default: false
+      skip_sync:
+        description: 'Skip ArgoCD sync after build'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: dice-docker-local.bart.sec.samsung.net
+  ARGOCD_APP_NAME: dice-stage
+  ARGOCD_CLI_URL: ${{ vars.ARGOCD_CLI_URL || 'https://bart.sec.samsung.net/artifactory/dice-generic-local/argocd-linux-amd64' }}
+  ARGOCD_CLI_SHA256: ${{ vars.ARGOCD_CLI_SHA256 || '' }}
+  DOCKER_BUILDKIT: "1"
+  SPACE_CODE_STORAGE_PREFIX: ${{ vars.SPACE_CODE_STORAGE_PREFIX || 'space-code' }}
+  SPACE_CODE_STORAGE_REGION: ${{ vars.SPACE_CODE_STORAGE_REGION || vars.S3_REGION || 'us-east-1' }}
+  SPACE_CODE_NO_VERIFY_SSL: ${{ vars.SPACE_CODE_NO_VERIFY_SSL || 'false' }}
+
+jobs:
+  setup:
+    runs-on: [code-linux, code-xlarge]
+    outputs:
+      web_auth: ${{ steps.changes.outputs.web_auth }}
+      docs: ${{ steps.changes.outputs.docs }}
+      backend: ${{ steps.changes.outputs.backend }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      dashboard_mcp: ${{ steps.changes.outputs.dashboard_mcp }}
+      dashboard: ${{ steps.changes.outputs.dashboard }}
+      mcp: ${{ steps.changes.outputs.mcp }}
+      trainers: ${{ steps.changes.outputs.trainers }}
+      dataset_cache: ${{ steps.changes.outputs.dataset_cache }}
+      runner: ${{ steps.changes.outputs.runner }}
+      labeler_backend: ${{ steps.changes.outputs.labeler_backend }}
+      inference_gateway: ${{ steps.changes.outputs.inference_gateway }}
+      labeler_frontend: ${{ steps.changes.outputs.labeler_frontend }}
+      dice_bot: ${{ steps.changes.outputs.dice_bot }}
+      user_service: ${{ steps.changes.outputs.user_service }}
+      chart_changed: ${{ steps.changes.outputs.chart_changed }}
+      trainer_list: ${{ steps.trainers.outputs.list }}
+      changed_trainers: ${{ steps.detect_trainers.outputs.changed }}
+      labeler_frontend_tag: ${{ steps.tag.outputs.labeler_frontend_tag }}
+      tag: ${{ steps.tag.outputs.tag }}
+      date: ${{ steps.tag.outputs.date }}
+    steps:
+      - name: Check if internal mirror
+        id: check
+        run: |
+          if [ "${{ vars.ENABLE_HELM_PUBLISH }}" = "true" ]; then
+            echo "Running in internal mirror repository"
+          else
+            echo "::warning::Skipping - ENABLE_HELM_PUBLISH is not set to 'true'"
+            echo "::warning::Set repository variable ENABLE_HELM_PUBLISH=true in internal mirror"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Detect changes
+        id: changes
+        env:
+          CANDIDATE_UPLOAD_ENABLED: ${{ inputs.candidate_upload_enabled && 'true' || 'false' }}
+        run: |
+          WEB=false
+          WEB_AUTH=false
+          DOCS=false
+          BACKEND=false
+          FRONTEND=false
+          DASHBOARD=false
+          DASHBOARD_MCP=false
+          MCP=false
+          TRAINERS=false
+          DATASET_CACHE=false
+          RUNNER=false
+          LABELER_BACKEND=false
+          INFERENCE_GATEWAY=false
+          LABELER_FRONTEND=false
+          DICE_BOT=false
+          USER_SERVICE=false
+          CHART_CHANGED=false
+
+          EVENT="${{ github.event_name }}"
+          COMPONENTS="${{ github.event.inputs.components }}"
+          COMPONENTS="$(printf '%s' "$COMPONENTS" | tr '[:upper:]' '[:lower:]' | tr '_' '-' | tr -d '[:space:]')"
+
+          requested() {
+            [ "$COMPONENTS" = "all" ] || printf ',%s,' "$COMPONENTS" | grep -q ",$1,"
+          }
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "Components requested: ${COMPONENTS:-backend,frontend}"
+            if [ -z "$COMPONENTS" ] || requested "all"; then
+              BACKEND=true
+              FRONTEND=true
+              DASHBOARD=true
+              DASHBOARD_MCP=true
+              MCP=true
+              WEB_AUTH=true
+              DOCS=true
+              TRAINERS=true
+              DATASET_CACHE=true
+              RUNNER=true
+              LABELER_BACKEND=true
+              INFERENCE_GATEWAY=true
+              LABELER_FRONTEND=true
+              DICE_BOT=true
+              USER_SERVICE=true
+              CHART_CHANGED=true
+            else
+              requested "backend" && BACKEND=true
+              requested "frontend" && FRONTEND=true
+              requested "dashboard" && DASHBOARD=true
+              requested "dashboard-mcp" && DASHBOARD_MCP=true
+              requested "mcp" && MCP=true
+              requested "web" && WEB=true
+              requested "web-auth" && WEB_AUTH=true
+              requested "docs" && DOCS=true
+              requested "trainers" && TRAINERS=true
+              requested "dataset-cache" && DATASET_CACHE=true
+              requested "runner" && RUNNER=true
+              if requested "labeler"; then
+                INFERENCE_GATEWAY=true
+                LABELER_BACKEND=true
+                LABELER_FRONTEND=true
+              fi
+              requested "labeler-backend" && LABELER_BACKEND=true
+              requested "inference-gateway" && INFERENCE_GATEWAY=true
+              requested "labeler-frontend" && LABELER_FRONTEND=true
+              requested "dice-bot" && DICE_BOT=true
+              requested "user-service" && USER_SERVICE=true
+              requested "chart" && CHART_CHANGED=true
+            fi
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+              BASE="$(git rev-list --max-parents=0 "$HEAD" | tail -n 1)"
+            fi
+
+            CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD")"
+            echo "Changed files:"
+            printf '%s\n' "$CHANGED_FILES"
+
+            matches_changed() {
+              printf '%s\n' "$CHANGED_FILES" | grep -Eq "$1"
+            }
+
+            matches_changed '^platform/backend/' && BACKEND=true
+            matches_changed '^platform/trainers/[^/]+/capabilities\.json$' && BACKEND=true
+            matches_changed '^platform/agent-backend/' && BACKEND=true
+            matches_changed '^platform/dice-agent-core/' && BACKEND=true
+            matches_changed '^platform/frontend/' && FRONTEND=true
+            matches_changed '^dashboard/(backend|frontend)/' && DASHBOARD=true
+            matches_changed '^dashboard/mcp-server/' && DASHBOARD_MCP=true
+            matches_changed '^platform/mcp-server/' && MCP=true
+            matches_changed '^platform/dice-agent-core/' && MCP=true
+            matches_changed '^web/' && WEB=true
+            matches_changed '^web-auth/' && WEB_AUTH=true
+            matches_changed '^docs-site/' && DOCS=true
+            matches_changed '^labeler/frontend/packages/dice-ui/' && FRONTEND=true
+            matches_changed '^platform/dice-platform-runtime/' && TRAINERS=true
+            matches_changed '^platform/dice-dataset-cache/' && DATASET_CACHE=true
+            matches_changed '^platform/trainers/' && TRAINERS=true
+            matches_changed '^platform/scripts/(pack_runner_env\.sh|upload_runner_env_bundle\.py)$' && RUNNER=true
+            matches_changed '^docs/runner/' && RUNNER=true
+            matches_changed '^runner/' && RUNNER=true
+            matches_changed '^labeler/backend/' && LABELER_BACKEND=true
+            matches_changed '^labeler/inference-gateway/' && INFERENCE_GATEWAY=true
+            matches_changed '^infrastructure/(helm/environments/stage-shared-inference\.json|scripts/configure-stage-shared-inference\.sh)$' && INFERENCE_GATEWAY=true
+            matches_changed '^labeler/frontend/' && LABELER_FRONTEND=true
+            matches_changed '^dice-bot/' && DICE_BOT=true
+            matches_changed '^user-service/' && USER_SERVICE=true
+            matches_changed '^infrastructure/helm/(vision-ai-platform|environments|argocd)/' && CHART_CHANGED=true
+            matches_changed '^\.github/workflows/helm-publish-internal\.yaml$' && CHART_CHANGED=true
+          fi
+
+          if [ "$CANDIDATE_UPLOAD_ENABLED" = "true" ] && [ "$LABELER_FRONTEND" != "true" ]; then
+            echo "::error::candidate_upload_enabled requires components to include labeler-frontend"
+            exit 1
+          fi
+
+          {
+            echo "web=$WEB"
+            echo "web_auth=$WEB_AUTH"
+            echo "docs=$DOCS"
+            echo "backend=$BACKEND"
+            echo "frontend=$FRONTEND"
+            echo "dashboard=$DASHBOARD"
+            echo "dashboard_mcp=$DASHBOARD_MCP"
+            echo "mcp=$MCP"
+            echo "trainers=$TRAINERS"
+            echo "dataset_cache=$DATASET_CACHE"
+            echo "runner=$RUNNER"
+            echo "labeler_backend=$LABELER_BACKEND"
+            echo "inference_gateway=$INFERENCE_GATEWAY"
+            echo "labeler_frontend=$LABELER_FRONTEND"
+            echo "dice_bot=$DICE_BOT"
+            echo "user_service=$USER_SERVICE"
+            echo "chart_changed=$CHART_CHANGED"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Selection:"
+          echo "  web=$WEB"
+          echo "  web_auth=$WEB_AUTH"
+          echo "  docs=$DOCS"
+          echo "  backend=$BACKEND"
+          echo "  frontend=$FRONTEND"
+          echo "  dashboard=$DASHBOARD"
+          echo "  trainers=$TRAINERS"
+          echo "  dataset_cache=$DATASET_CACHE"
+          echo "  runner=$RUNNER"
+          echo "  labeler_backend=$LABELER_BACKEND"
+          echo "  labeler_frontend=$LABELER_FRONTEND"
+          echo "  dice_bot=$DICE_BOT"
+          echo "  user_service=$USER_SERVICE"
+          echo "  chart_changed=$CHART_CHANGED"
+
+      - name: List trainers
+        id: trainers
+        run: |
+          TRAINERS=$(find platform/trainers -maxdepth 2 -name "Dockerfile" -exec dirname {} \; | xargs -I{} basename {} | tr '\n' ',' | sed 's/,$//')
+          echo "list=$TRAINERS" >> "$GITHUB_OUTPUT"
+          echo "Found trainers: $TRAINERS"
+
+      - name: Detect changed trainers
+        id: detect_trainers
+        run: |
+          EVENT="${{ github.event_name }}"
+          CHANGED_TRAINERS='[]'
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # Force build all trainers on manual trigger
+            CHANGED_TRAINERS='["ultralytics","huggingface","vfm-v1","vfm-v3-det-bastion","dice_v1","timm","openmm","space"]'
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+              BASE="$(git rev-list --max-parents=0 "$HEAD" | tail -n 1)"
+            fi
+
+            CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD")"
+
+            if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^platform/dice-platform-runtime/'; then
+              # Every trainer image bakes dice-platform-runtime in at build time
+              # (COPY dice-platform-runtime + pip install), and every Space code
+              # bundle re-embeds its source (see the "Upload Space Trainer Code
+              # Bundle" step below). A change here invalidates all of them, so
+              # treat it the same as the workflow_dispatch "build everything"
+              # path instead of relying on per-directory diffs to catch it.
+              echo "dice-platform-runtime changed; rebuilding all trainers"
+              CHANGED_TRAINERS='["ultralytics","huggingface","vfm-v1","vfm-v3-det-bastion","dice_v1","timm","openmm","space"]'
+            else
+              # Extract changed trainer directories from platform/trainers/{trainer}/*
+              TRAINERS=$(printf '%s\n' "$CHANGED_FILES" | grep -E '^platform/trainers/[^/]+' | cut -d'/' -f3 | sort -u)
+
+              # Convert to JSON array
+              if [ -n "$TRAINERS" ]; then
+                CHANGED_TRAINERS=$(printf '%s\n' "$TRAINERS" | jq -R . | jq -cs .)
+              fi
+            fi
+          fi
+
+          echo "changed=$CHANGED_TRAINERS" >> "$GITHUB_OUTPUT"
+          echo "Changed trainers: $CHANGED_TRAINERS"
+
+      - name: Generate CalVer tag
+        id: tag
+        env:
+          CANDIDATE_UPLOAD_ENABLED: ${{ inputs.candidate_upload_enabled && 'true' || 'false' }}
+        run: |
+          if [ -n "${{ github.event.inputs.tag_override }}" ]; then
+            TAG="${{ github.event.inputs.tag_override }}"
+          else
+            DATE=$(date +'%Y.%m.%d')
+            SHORT_SHA=$(git rev-parse --short=7 HEAD)
+            TAG="${DATE}-${SHORT_SHA}"
+          fi
+          LABELER_FRONTEND_TAG="$TAG"
+          if [ "$CANDIDATE_UPLOAD_ENABLED" = "true" ]; then
+            LABELER_FRONTEND_TAG="${TAG}-candidate-upload"
+          fi
+          echo "labeler_frontend_tag=$LABELER_FRONTEND_TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "date=$(date +'%Y.%m.%d')" >> "$GITHUB_OUTPUT"
+          echo "Generated tag: $TAG"
+
+  build-platform:
+    needs: [setup]
+    if: needs.setup.outputs.backend == 'true' || needs.setup.outputs.frontend == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-platform-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Backend
+        if: needs.setup.outputs.backend == 'true'
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./platform
+          file: ./platform/backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-platform-backend:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-platform-backend:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+      - name: Build and Push Frontend
+        if: needs.setup.outputs.frontend == 'true'
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          file: ./platform/frontend/Dockerfile.prod
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-platform-frontend:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-platform-frontend:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+            NEXT_PUBLIC_API_URL=/platform/api/v1
+            NEXT_PUBLIC_USER_API_URL=/user/api/v1
+            NEXT_PUBLIC_LABELER_API_URL=/labeler/api/v1
+            NEXT_PUBLIC_BASE_PATH=/platform
+            NEXT_PUBLIC_LABELER_FRONTEND_URL=/labeler
+            NEXT_PUBLIC_HOME_URL=/
+            NEXT_PUBLIC_LABELER_URL=/labeler
+            NEXT_PUBLIC_PLATFORM_URL=/platform
+            NEXT_PUBLIC_RUNNER_URL=/runner
+            NEXT_PUBLIC_DOCS_URL=/docs/ko/guide/overview
+            NEXT_PUBLIC_ACTIVATION_URL=/activation
+            NEXT_PUBLIC_DOWNLOADS_URL=/downloads
+
+  build-dataset-cache:
+    needs: [setup]
+    if: needs.setup.outputs.dataset_cache == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-dataset-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Dataset Cache Worker
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./platform
+          file: ./platform/dice-dataset-cache/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/vision-ai-dataset-cache:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/vision-ai-dataset-cache:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-dashboard-mcp:
+    needs: [setup]
+    if: needs.setup.outputs.dashboard_mcp == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-dashboard-mcp-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Dashboard MCP Server
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./dashboard
+          file: ./dashboard/mcp-server/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-dashboard-mcp-server:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-dashboard-mcp-server:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-web-auth:
+    needs: [setup]
+    if: needs.setup.outputs.web_auth == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-web-auth-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Web Auth
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          file: ./web-auth/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-web-auth:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-web-auth:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-dashboard:
+    needs: [setup]
+    if: needs.setup.outputs.dashboard == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-dashboard-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Dashboard Frontend
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          file: ./dashboard/frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-dashboard-frontend:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-dashboard-frontend:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            NEXT_PUBLIC_BASE_PATH=/dashboard
+            NEXT_PUBLIC_AUTH_BASE_URL=
+            NEXT_PUBLIC_ACTIVATION_API_URL=/activation/dashboard
+            NEXT_PUBLIC_USER_API_URL=/user/api/v1
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+      - name: Build and Push Dashboard Backend
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          file: ./dashboard/backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-dashboard-backend:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-dashboard-backend:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-docs:
+    needs: [setup]
+    if: needs.setup.outputs.docs == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-docs-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Docs
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          file: ./docs-site/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-docs:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-docs:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-mcp:
+    needs: [setup]
+    if: needs.setup.outputs.mcp == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-mcp-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push MCP Server
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./platform
+          file: ./platform/mcp-server/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-mcp-server:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-mcp-server:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-labeler:
+    needs: [setup]
+    if: |
+      needs.setup.outputs.labeler_backend == 'true' ||
+      needs.setup.outputs.inference_gateway == 'true' ||
+      needs.setup.outputs.labeler_frontend == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-labeler-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Inference Gateway
+        if: needs.setup.outputs.inference_gateway == 'true'
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./labeler/inference-gateway
+          file: ./labeler/inference-gateway/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-inference-gateway:${{ needs.setup.outputs.tag }}
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+
+      - name: Build and Push Labeler Backend
+        if: needs.setup.outputs.labeler_backend == 'true'
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./labeler/backend
+          file: ./labeler/backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-labeler-backend:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-labeler-backend:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+      - name: Build and Push Labeler Frontend
+        if: needs.setup.outputs.labeler_frontend == 'true'
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./labeler/frontend
+          file: ./labeler/frontend/apps/dice/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-labeler-frontend:${{ needs.setup.outputs.labeler_frontend_tag }}
+            ${{ !inputs.candidate_upload_enabled && format('{0}/dice-labeler-frontend:latest', env.REGISTRY) || '' }}
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+            GITHUB_TOKEN=${{ secrets.GIT_COM_TOKEN }}
+            NEXT_PUBLIC_API_URL=/labeler/api/v1
+            NEXT_PUBLIC_APP_NAME=Vision AI Labeler
+            NEXT_PUBLIC_BASE_PATH=/labeler
+            NEXT_PUBLIC_HOME_URL=/
+            NEXT_PUBLIC_LABELER_URL=/labeler
+            NEXT_PUBLIC_PLATFORM_URL=/platform
+            NEXT_PUBLIC_RUNNER_URL=/runner
+            NEXT_PUBLIC_DOCS_URL=/docs/ko/guide/overview
+            NEXT_PUBLIC_ACTIVATION_URL=/activation
+            NEXT_PUBLIC_DOWNLOADS_URL=/downloads
+            NEXT_PUBLIC_ENABLE_IMAGE_LOCK=true
+            NEXT_PUBLIC_ENABLE_MASK_EDITOR_PREVIEW=true
+            NEXT_PUBLIC_CANDIDATE_UPLOAD_ENABLED=${{ inputs.candidate_upload_enabled && 'true' || 'false' }}
+
+  build-dice-bot:
+    needs: [setup]
+    if: needs.setup.outputs.dice_bot == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-dice-bot-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Dice Bot
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./dice-bot
+          file: ./dice-bot/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/vision-dice-bot:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/vision-dice-bot:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-user-service:
+    needs: [setup]
+    if: needs.setup.outputs.user_service == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-user-service-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push User Service
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./user-service
+          file: ./user-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/vision-user-service:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/vision-user-service:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ needs.setup.outputs.tag }}
+
+  build-runner:
+    needs: [setup]
+    if: needs.setup.outputs.runner == 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-runner-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Prepare Artifactory netrc for BuildKit
+        shell: bash
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ARTIFACTORY_USERNAME" ] && [ -n "$JFROG_API_TOKEN" ]; then
+            username="$ARTIFACTORY_USERNAME"
+            password="$JFROG_API_TOKEN"
+          else
+            username="$DOCKER_USERNAME"
+            password="$DOCKER_PASSWORD"
+          fi
+          test -n "$username" && test -n "$password"
+          umask 077
+          printf 'machine bart.sec.samsung.net login %s password %s\n' "$username" "$password" > "$RUNNER_TEMP/runner-artifactory.netrc"
+
+      - name: Build and Push Runner
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          file: ./runner/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-runner:${{ needs.setup.outputs.tag }}
+            ${{ env.REGISTRY }}/dice-runner:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            ORT_MIRROR_URL=https://bart.sec.samsung.net/artifactory/dice-generic-local/dice-runner/onnxruntime/ort-sys-2.0.0-rc.12
+            NEXT_PUBLIC_HOME_URL=/
+            NEXT_PUBLIC_LABELER_URL=/labeler
+            NEXT_PUBLIC_PLATFORM_URL=/platform
+            NEXT_PUBLIC_RUNNER_URL=/runner
+            NEXT_PUBLIC_DOCS_URL=/docs/ko/guide/overview
+            NEXT_PUBLIC_ACTIVATION_URL=/activation
+            NEXT_PUBLIC_DOWNLOADS_URL=/downloads
+          secret-files: |
+            netrc=${{ runner.temp }}/runner-artifactory.netrc
+
+  build-trainers:
+    needs: [setup]
+    if: needs.setup.outputs.trainers == 'true'
+    runs-on: [code-linux, code-xlarge]
+    strategy:
+      matrix:
+        include:
+          - trainer: ultralytics
+            image: trainer-ultralytics
+            helm_key: ultralytics
+          - trainer: huggingface
+            image: trainer-huggingface
+            helm_key: huggingface
+          - trainer: vfm-v1
+            image: trainer-vfm-v1
+            helm_key: vfm-v1
+          - trainer: vfm-v1
+            variant: cu128
+            image: trainer-vfm-v1-cu128
+            dockerfile: trainers/vfm-v1/Dockerfile.cu128
+            helm_key: vfm-v1-cu128
+          - trainer: vfm-v3-det-bastion
+            image: trainer-vfm-v3-det-bastion
+            helm_key: vfm-v3-det-bastion
+          - trainer: dice_v1
+            image: trainer-dice-v1
+            helm_key: dice_v1
+          - trainer: timm
+            image: trainer-timm
+            helm_key: timm
+          - trainer: openmm
+            variant: cu118
+            image: trainer-openmm-cu118
+            dockerfile: trainers/openmm/Dockerfile
+            helm_key: openmm-cu118
+          - trainer: openmm
+            variant: cu128
+            image: trainer-openmm-cu128
+            dockerfile: trainers/openmm/Dockerfile.cu128
+            helm_key: openmm-cu128
+          - trainer: space
+            image: space-adapter
+            helm_key: space
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Check if trainer exists and was changed
+        id: check
+        run: |
+          DOCKERFILE="${{ matrix.dockerfile || format('trainers/{0}/Dockerfile', matrix.trainer) }}"
+          CHANGED_TRAINERS='${{ needs.setup.outputs.changed_trainers }}'
+
+          if [ -f "platform/$DOCKERFILE" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "dockerfile=$DOCKERFILE" >> "$GITHUB_OUTPUT"
+
+            # Check if this trainer is in the changed list
+            # CHANGED_TRAINERS is a JSON array like ["ultralytics","vfm-v1",...]
+            # Use jq to check membership
+            if echo "$CHANGED_TRAINERS" | jq -e "map(select(. == \"${{ matrix.trainer }}\")) | length > 0" >/dev/null 2>&1; then
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Trainer ${{ matrix.trainer }} was not changed, skipping build"
+            fi
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Trainer ${{ matrix.trainer }} does not have a Dockerfile"
+          fi
+
+      - name: Generate trainer-specific version tag
+        id: trainer_version
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.skip == 'false'
+        run: |
+          # Shared runtime changes must also produce a fresh trainer image tag.
+          TRAINER_DIR="platform/trainers/${{ matrix.trainer }}"
+          TRAINER_COMMIT=$(git log -1 --format=%h -- "$TRAINER_DIR" platform/dice-platform-runtime)
+          VERSION_TAG=$(date +%Y.%m.%d)-$TRAINER_COMMIT
+          echo "tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+          echo "Generated trainer version: $VERSION_TAG"
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.skip == 'false'
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-trainer-${{ matrix.trainer }}-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.skip == 'false'
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Prepare Artifactory netrc for BuildKit
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.skip == 'false'
+        shell: bash
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          NETRC_FILE="$RUNNER_TEMP/artifactory.netrc"
+          if [ -z "$ARTIFACTORY_USERNAME" ] || [ -z "$JFROG_API_TOKEN" ]; then
+            if [ "${{ matrix.trainer }}" = "vfm-v1" ] && [ "${{ matrix.variant }}" = "cu128" ]; then
+              echo "::error::Artifactory credentials are not configured"
+              exit 1
+            fi
+            : > "$NETRC_FILE"
+          else
+            printf 'machine bart.sec.samsung.net login %s password %s\n' "$ARTIFACTORY_USERNAME" "$JFROG_API_TOKEN" > "$NETRC_FILE"
+          fi
+          chmod 600 "$NETRC_FILE"
+
+      - name: Build and Push Trainer
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.skip == 'false'
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: ./platform
+          file: ./platform/${{ steps.check.outputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ steps.trainer_version.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}:latest
+          build-args: |
+            REGISTRY_MIRROR=docker-remote.bart.sec.samsung.net/
+            GHCR_MIRROR=ghcr-docker-remote.bart.sec.samsung.net/
+            BUILD_DATE=${{ needs.setup.outputs.date }}
+            VERSION=${{ steps.trainer_version.outputs.tag }}
+          secret-files: |
+            netrc=${{ runner.temp }}/artifactory.netrc
+
+      - name: Upload Space Trainer Code Bundle
+        if: steps.check.outputs.exists == 'true' && steps.check.outputs.skip == 'false' && matrix.trainer != 'space'
+        shell: bash
+        env:
+          TRAINER: ${{ matrix.trainer }}
+          VERSION_TAG: ${{ steps.trainer_version.outputs.tag }}
+          S3_BUCKET: ${{ vars.S3_BUCKET || secrets.S3_BUCKET }}
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT || secrets.S3_ENDPOINT }}
+          S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY || vars.S3_ACCESS_KEY }}
+          S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY || vars.S3_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+
+          MISSING=0
+          for NAME in S3_BUCKET SPACE_CODE_STORAGE_PREFIX S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY; do
+            if [ -z "${!NAME:-}" ]; then
+              echo "::error::$NAME is not configured"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
+
+          python3 - <<'PY' || python3 -m pip install --user botocore
+          import botocore
+          PY
+
+          WORK_DIR="$RUNNER_TEMP/space-code/$TRAINER/root"
+          ARCHIVE="$RUNNER_TEMP/space-code/$TRAINER.tar.gz"
+          rm -rf "$RUNNER_TEMP/space-code/$TRAINER"
+          mkdir -p "$WORK_DIR"
+
+          cp -a "platform/trainers/$TRAINER/." "$WORK_DIR/"
+          cp -a "platform/dice-platform-runtime/src/dice_platform_runtime" "$WORK_DIR/dice_platform_runtime"
+
+          find "$WORK_DIR" -type d \( -name __pycache__ -o -name .pytest_cache -o -name .venv -o -name tests \) -prune -exec rm -rf {} +
+          find "$WORK_DIR" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
+          tar --sort=name --owner=0 --group=0 --numeric-owner -czf "$ARCHIVE" -C "$WORK_DIR" .
+          SHA256="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+          KEY="${SPACE_CODE_STORAGE_PREFIX%/}/$VERSION_TAG/$TRAINER.tar.gz"
+          export ARCHIVE KEY SHA256
+
+          python3 - <<'PY'
+          import os
+          import ssl
+          import urllib.request
+          from pathlib import Path
+
+          import botocore.session
+          from botocore.client import Config
+
+          archive = Path(os.environ["ARCHIVE"])
+          key = os.environ["KEY"]
+          sha256 = os.environ["SHA256"]
+          no_verify = str(os.getenv("SPACE_CODE_NO_VERIFY_SSL", "")).lower() in {"1", "true", "yes", "on"}
+          bucket = os.environ["S3_BUCKET"]
+
+          session = botocore.session.get_session()
+          client = session.create_client(
+              "s3",
+              endpoint_url=os.environ["S3_ENDPOINT"],
+              aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["S3_SECRET_KEY"],
+              region_name=os.getenv("SPACE_CODE_STORAGE_REGION") or "us-east-1",
+              verify=not no_verify,
+              config=Config(
+                  signature_version="s3v4",
+                  retries={"max_attempts": 5, "mode": "standard"},
+                  connect_timeout=10,
+                  read_timeout=120,
+              ),
+          )
+
+          def put_object_with_length(object_key, body, content_type):
+              url = client.generate_presigned_url(
+                  "put_object",
+                  Params={
+                      "Bucket": bucket,
+                      "Key": object_key,
+                      "ContentType": content_type,
+                  },
+                  ExpiresIn=3600,
+              )
+              request = urllib.request.Request(
+                  url,
+                  data=body,
+                  headers={
+                      "Content-Type": content_type,
+                      "Content-Length": str(len(body)),
+                  },
+                  method="PUT",
+              )
+              context = ssl._create_unverified_context() if no_verify else None
+              with urllib.request.urlopen(request, timeout=300, context=context) as response:
+                  if response.status >= 400:
+                      raise RuntimeError(
+                          f"upload failed for {object_key}: HTTP {response.status}"
+                      )
+
+          put_object_with_length(key, archive.read_bytes(), "application/gzip")
+          put_object_with_length(
+              f"{key}.sha256",
+              f"{sha256}  {archive.name}\n".encode("utf-8"),
+              "text/plain; charset=utf-8",
+          )
+          PY
+
+          {
+            echo "### Space trainer code bundle: $TRAINER"
+            echo ""
+            echo "- key: \`$KEY\`"
+            echo "- sha256: \`$SHA256\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  argocd-sync:
+    name: Sync Argo CD Stage
+    needs: [setup, build-web-auth, build-dashboard, build-docs, build-platform, build-dataset-cache, build-mcp, build-dashboard-mcp, build-labeler, build-dice-bot, build-user-service, build-runner, build-trainers]
+    if: |
+      always() &&
+      github.event.inputs.skip_sync != 'true' &&
+      (needs.build-web-auth.result == 'success' || needs.build-web-auth.result == 'skipped') &&
+      (needs.build-dashboard.result == 'success' || needs.build-dashboard.result == 'skipped') &&
+      (needs.build-docs.result == 'success' || needs.build-docs.result == 'skipped') &&
+      (needs.build-platform.result == 'success' || needs.build-platform.result == 'skipped') &&
+      (needs.build-dataset-cache.result == 'success' || needs.build-dataset-cache.result == 'skipped') &&
+      (needs.build-dashboard-mcp.result == 'success' || needs.build-dashboard-mcp.result == 'skipped') &&
+      (needs.build-mcp.result == 'success' || needs.build-mcp.result == 'skipped') &&
+      (needs.build-labeler.result == 'success' || needs.build-labeler.result == 'skipped') &&
+      (needs.build-dice-bot.result == 'success' || needs.build-dice-bot.result == 'skipped') &&
+      (needs.build-user-service.result == 'success' || needs.build-user-service.result == 'skipped') &&
+      (needs.build-runner.result == 'success' || needs.build-runner.result == 'skipped') &&
+      (needs.build-trainers.result == 'success' || needs.build-trainers.result == 'skipped') &&
+      (
+        needs.setup.outputs.web == 'true' ||
+        needs.setup.outputs.web_auth == 'true' ||
+        needs.setup.outputs.dashboard == 'true' ||
+        needs.setup.outputs.docs == 'true' ||
+        needs.setup.outputs.backend == 'true' ||
+        needs.setup.outputs.frontend == 'true' ||
+        needs.setup.outputs.dashboard_mcp == 'true' ||
+        needs.setup.outputs.mcp == 'true' ||
+        needs.setup.outputs.trainers == 'true' ||
+        needs.setup.outputs.dataset_cache == 'true' ||
+        needs.setup.outputs.runner == 'true' ||
+        needs.setup.outputs.labeler_backend == 'true' ||
+        needs.setup.outputs.inference_gateway == 'true' ||
+        needs.setup.outputs.labeler_frontend == 'true' ||
+        needs.setup.outputs.dice_bot == 'true' ||
+        needs.setup.outputs.user_service == 'true' ||
+        needs.setup.outputs.chart_changed == 'true'
+      )
+    runs-on: [code-linux, code-xlarge]
+    concurrency:
+      group: argocd-stage-sync
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Install ArgoCD CLI
+        shell: bash
+        env:
+          ARGOCD_CLI_USERNAME: ${{ secrets.ARGOCD_CLI_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME || secrets.DOCKER_USERNAME }}
+          ARGOCD_CLI_PASSWORD: ${{ secrets.ARGOCD_CLI_PASSWORD || secrets.ARTIFACTORY_TOKEN || secrets.BART_TOKEN || secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          TOOL_DIR="${RUNNER_TEMP}/argocd-cli"
+          mkdir -p "$TOOL_DIR"
+
+          CURL_ARGS=(-fsSL --retry 3 --retry-delay 5)
+          if [ -n "${ARGOCD_CLI_USERNAME:-}" ] && [ -n "${ARGOCD_CLI_PASSWORD:-}" ]; then
+            CURL_ARGS+=(-u "${ARGOCD_CLI_USERNAME}:${ARGOCD_CLI_PASSWORD}")
+          fi
+
+          echo "Downloading ArgoCD CLI from BART generic storage"
+          curl "${CURL_ARGS[@]}" "$ARGOCD_CLI_URL" -o "$TOOL_DIR/argocd"
+
+          if [ -n "${ARGOCD_CLI_SHA256:-}" ]; then
+            echo "${ARGOCD_CLI_SHA256}  ${TOOL_DIR}/argocd" | sha256sum -c -
+          fi
+
+          chmod +x "$TOOL_DIR/argocd"
+          echo "$TOOL_DIR" >> "$GITHUB_PATH"
+          "$TOOL_DIR/argocd" version --client
+
+      - name: Update Web Auth Image Tag
+        if: needs.setup.outputs.web_auth == 'true' && needs.build-web-auth.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set webAuth.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated web auth image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Dashboard Image Tags
+        if: needs.setup.outputs.dashboard == 'true' && needs.build-dashboard.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} \
+            --helm-set dashboard.enabled=true \
+            --helm-set dashboard.frontend.image.tag=${{ needs.setup.outputs.tag }} \
+            --helm-set dashboard.backend.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated Dashboard frontend and backend image tags to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Docs Image Tag
+        if: needs.setup.outputs.docs == 'true' && needs.build-docs.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set docs.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated docs image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Platform Backend Image Tag
+        if: needs.setup.outputs.backend == 'true' && needs.build-platform.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set platform.backend.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated platform backend image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Platform Frontend Image Tag
+        if: needs.setup.outputs.frontend == 'true' && needs.build-platform.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set platform.frontend.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated platform frontend image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Dataset Cache Worker Image Tag
+        if: needs.setup.outputs.dataset_cache == 'true' && needs.build-dataset-cache.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} \
+            --helm-set platform.training.datasetCache.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated dataset cache worker image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Dashboard MCP Image Tag
+        if: needs.setup.outputs.dashboard_mcp == 'true' && needs.build-dashboard-mcp.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set platform.dashboardMcp.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated dashboard MCP image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update MCP Image Tag
+        if: needs.setup.outputs.mcp == 'true' && needs.build-mcp.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set platform.mcp.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated MCP image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Trainer Image Tags
+        if: needs.setup.outputs.trainers == 'true' && needs.build-trainers.result == 'success'
+        run: |
+          # Build argocd command with per-trainer tags
+          ARGOCD_ARGS="--server ${{ secrets.ARGOCD_SERVER }} --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} --grpc-web-root-path /argo --insecure"
+
+          # Get list of changed trainers from the setup job
+          CHANGED_TRAINERS='${{ needs.setup.outputs.changed_trainers }}'
+          echo "Changed trainers: $CHANGED_TRAINERS"
+
+          # Update each trainer's image tag based on actual directory changes
+          # Trainer directories: ultralytics, huggingface, vfm-v1, dice_v1, timm, openmm, space
+          TRAINERS=(
+            "ultralytics:ultralytics"
+            "huggingface:huggingface"
+            "vfm-v1:vfm-v1"
+            "vfm-v3-det-bastion:vfm-v3-det-bastion"
+            "dice_v1:dice_v1"
+            "timm:timm"
+            "space:space"
+          )
+
+          # Get the commit hash for each trainer and update Helm values
+          for TRAINER_PAIR in "${TRAINERS[@]}"; do
+            TRAINER_DIR="${TRAINER_PAIR%%:*}"
+            HELM_KEY="${TRAINER_PAIR##*:}"
+            TRAINER_PATH="platform/trainers/$TRAINER_DIR"
+
+            # Only update if this trainer was changed
+            if echo "$CHANGED_TRAINERS" | jq -e "map(select(. == \"$TRAINER_DIR\")) | length > 0" >/dev/null 2>&1; then
+              if [ -d "$TRAINER_PATH" ]; then
+                TRAINER_COMMIT=$(git log -1 --format=%h -- "$TRAINER_PATH" platform/dice-platform-runtime 2>/dev/null || echo "")
+                if [ -n "$TRAINER_COMMIT" ]; then
+                  VERSION_TAG=$(date +%Y.%m.%d)-$TRAINER_COMMIT
+                  argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set platform.training.frameworks.$HELM_KEY.image_tag=$VERSION_TAG $ARGOCD_ARGS
+                  echo "Updated trainer $HELM_KEY (dir: $TRAINER_DIR) image tag to $VERSION_TAG"
+                fi
+              fi
+            else
+              echo "Skipping trainer $HELM_KEY (dir: $TRAINER_DIR) - not changed"
+            fi
+          done
+
+          # Special handling for openmm cu118 and cu128 variants (same directory, both frameworks)
+          if echo "$CHANGED_TRAINERS" | jq -e "map(select(. == \"openmm\")) | length > 0" >/dev/null 2>&1; then
+            if [ -d "platform/trainers/openmm" ]; then
+              OPENMM_COMMIT=$(git log -1 --format=%h -- platform/trainers/openmm platform/dice-platform-runtime 2>/dev/null || echo "")
+              if [ -n "$OPENMM_COMMIT" ]; then
+                VERSION_TAG=$(date +%Y.%m.%d)-$OPENMM_COMMIT
+                argocd app set ${{ env.ARGOCD_APP_NAME }} \
+                  --helm-set platform.training.frameworks.openmm-cu118.image_tag=$VERSION_TAG \
+                  --helm-set platform.training.frameworks.openmm-cu128.image_tag=$VERSION_TAG \
+                  $ARGOCD_ARGS
+                echo "Updated trainer openmm-cu118 and openmm-cu128 image tags to $VERSION_TAG"
+              fi
+            fi
+          else
+            echo "Skipping trainers openmm-cu118 and openmm-cu128 - not changed"
+          fi
+
+          # VFM-v1's CUDA variants share trainer code but publish independent images.
+          if echo "$CHANGED_TRAINERS" | jq -e "map(select(. == \"vfm-v1\")) | length > 0" >/dev/null 2>&1; then
+            if [ -d "platform/trainers/vfm-v1" ]; then
+              VFM_COMMIT=$(git log -1 --format=%h -- platform/trainers/vfm-v1 platform/dice-platform-runtime 2>/dev/null || echo "")
+              if [ -n "$VFM_COMMIT" ]; then
+                VERSION_TAG=$(date +%Y.%m.%d)-$VFM_COMMIT
+                argocd app set ${{ env.ARGOCD_APP_NAME }} \
+                  --helm-set platform.training.frameworks.vfm-v1.image_tag=$VERSION_TAG \
+                  --helm-set platform.training.frameworks.vfm-v1-cu128.image_tag=$VERSION_TAG \
+                  $ARGOCD_ARGS
+                echo "Updated trainer VFM-v1 CUDA variant image tags to $VERSION_TAG"
+              fi
+            fi
+          else
+            echo "Skipping trainers vfm-v1 and vfm-v1-cu128 - not changed"
+          fi
+
+      - name: Update Runner Image Tag
+        if: needs.setup.outputs.runner == 'true' && needs.build-runner.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set platform.runner.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated runner image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Shared Inference Gateway Image Tag
+        if: needs.setup.outputs.inference_gateway == 'true' && needs.build-labeler.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set sharedInference.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo --insecure
+
+      - name: Configure Stage Shared Inference
+        if: needs.setup.outputs.inference_gateway == 'true' && needs.build-labeler.result == 'success'
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: bash infrastructure/scripts/configure-stage-shared-inference.sh
+
+      - name: Update Labeler Backend Image Tag
+        if: needs.setup.outputs.labeler_backend == 'true' && needs.build-labeler.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set labeler.backend.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated labeler backend image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update Labeler Frontend Image Tag
+        if: needs.setup.outputs.labeler_frontend == 'true' && needs.build-labeler.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set labeler.frontend.image.tag=${{ needs.setup.outputs.labeler_frontend_tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated labeler frontend image tag to ${{ needs.setup.outputs.labeler_frontend_tag }}"
+
+      - name: Update Dice Bot Image Tag
+        if: needs.setup.outputs.dice_bot == 'true' && needs.build-dice-bot.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set diceBot.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated dice bot image tag to ${{ needs.setup.outputs.tag }}"
+
+      - name: Update User Service Image Tag
+        if: needs.setup.outputs.user_service == 'true' && needs.build-user-service.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --helm-set userService.image.tag=${{ needs.setup.outputs.tag }} \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Updated user service image tag to ${{ needs.setup.outputs.tag }}"
+
+      # New worker entrypoints must be available before an automatic chart sync.
+      - name: Pin Stage Chart Revision
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} --revision "${{ github.sha }}" \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Pinned stage chart revision to ${{ github.sha }}"
+
+      - name: Sync ArgoCD Application
+        run: |
+          echo "Triggering ArgoCD stage sync..."
+          argocd app sync ${{ env.ARGOCD_APP_NAME }} --prune --timeout 300 \
+            --server ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web-root-path /argo \
+            --insecure
+          echo "Sync completed"
+
+      - name: Summary
+        run: |
+          echo "## Docker Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag | \`${{ needs.setup.outputs.tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Labeler frontend tag | \`${{ needs.setup.outputs.labeler_frontend_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Candidate upload build | ${{ inputs.candidate_upload_enabled && 'true' || 'false' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Argo CD application | \`${{ env.ARGOCD_APP_NAME }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Git revision | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry | \`${{ env.REGISTRY }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trigger | ${{ github.event_name }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Chart changed | ${{ needs.setup.outputs.chart_changed }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Build Jobs" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Web Auth | ${{ needs.build-web-auth.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dashboard | ${{ needs.build-dashboard.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Docs | ${{ needs.build-docs.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platform | ${{ needs.build-platform.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Labeler | ${{ needs.build-labeler.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dice Bot | ${{ needs.build-dice-bot.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| User Service | ${{ needs.build-user-service.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Runner | ${{ needs.build-runner.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trainers | ${{ needs.build-trainers.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dataset Cache Worker | ${{ needs.build-dataset-cache.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Selected Components" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component | Selected |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Web | ${{ needs.setup.outputs.web }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Web Auth | ${{ needs.setup.outputs.web_auth }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dashboard | ${{ needs.setup.outputs.dashboard }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Docs | ${{ needs.setup.outputs.docs }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platform backend | ${{ needs.setup.outputs.backend }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platform frontend | ${{ needs.setup.outputs.frontend }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Trainers | ${{ needs.setup.outputs.trainers }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dataset Cache Worker | ${{ needs.setup.outputs.dataset_cache }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Runner | ${{ needs.setup.outputs.runner }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Labeler backend | ${{ needs.setup.outputs.labeler_backend }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Labeler frontend | ${{ needs.setup.outputs.labeler_frontend }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dice Bot | ${{ needs.setup.outputs.dice_bot }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| User Service | ${{ needs.setup.outputs.user_service }} |" >> "$GITHUB_STEP_SUMMARY"

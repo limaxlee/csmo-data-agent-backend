@@ -1,0 +1,4 @@
+platform/trainers/vfm-v1/data
+platform/trainers/vfm-v1/third_party
+platform/trainers/vfm-v1/configs
+platform/trainers/vfm-v1/yolo_world

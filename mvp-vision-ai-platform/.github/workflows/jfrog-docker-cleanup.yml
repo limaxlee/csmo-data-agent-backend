@@ -1,0 +1,492 @@
+name: JFrog Docker Retention Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_name:
+        description: 'Artifactory Docker repository name'
+        required: true
+        default: 'dice-docker-local'
+        type: string
+      keep_count:
+        description: 'Keep the newest N tags per image'
+        required: true
+        default: '5'
+        type: string
+      images:
+        description: 'Comma-separated image names; empty means every image in the repository'
+        required: false
+        default: ''
+        type: string
+      protected_tags:
+        description: 'Comma-separated tags to keep in addition to keep_count; empty means none'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Dry run: true previews only; false deletes matching tags'
+        required: false
+        default: true
+        type: boolean
+      trigger_gc:
+        description: 'Trigger Artifactory storage garbage collection after deleting tags; requires admin permission'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  JFROG_CLI_AVOID_NEW_VERSION_WARNING: "true"
+  JFROG_CLI_HIDE_SURVEY: "true"
+
+jobs:
+  cleanup:
+    name: Keep newest Docker tags
+    runs-on: [code-linux, code-xlarge]
+
+    steps:
+      - name: Set up patched JFrog CLI
+        uses: code-actions/jfrog-setup-jfrog-cli@v5
+        with:
+          version: '2.129.0'
+          disable-auto-build-publish: true
+          disable-auto-evidence-collection: true
+          disable-job-summary: true
+
+      - name: Resolve JFrog CLI
+        id: jfrog
+        shell: bash
+        env:
+          JFROG_URL: ${{ secrets.JFROG_URL }}
+          JFROG_ARTIFACTORY_URL: ${{ secrets.JFROG_ARTIFACTORY_URL }}
+          JFROG_ACCESS_TOKEN: ${{ secrets.JFROG_ACCESS_TOKEN }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+          JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+          JFROG_TOKEN: ${{ secrets.JFROG_TOKEN }}
+          JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if ! JFROG_CLI="$(command -v jf)"; then
+            echo "::error::JFrog CLI setup did not provide jf"
+            exit 1
+          fi
+
+          # CVE-2026-92892: reject an outdated binary before configuring credentials.
+          CLI_VERSION_OUTPUT="$("${JFROG_CLI}" --version)"
+          echo "${CLI_VERSION_OUTPUT}"
+          if [[ ! "${CLI_VERSION_OUTPUT}" =~ ^jf[[:space:]]version[[:space:]]([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Cannot determine the JFrog CLI release version"
+            exit 1
+          fi
+          CLI_VERSION="${BASH_REMATCH[1]}"
+          MINIMUM_VERSION=2.128.0
+          if [ "$(printf '%s\n' "${MINIMUM_VERSION}" "${CLI_VERSION}" | sort -V | head -n 1)" != "${MINIMUM_VERSION}" ]; then
+            echo "::error::JFrog CLI ${CLI_VERSION} is below the required ${MINIMUM_VERSION}"
+            exit 1
+          fi
+
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "::error::python3 is required for JSON parsing on this runner"
+            exit 1
+          fi
+
+          if ! command -v curl >/dev/null 2>&1; then
+            echo "::error::curl is required by jf rt curl on this runner"
+            exit 1
+          fi
+
+          echo "cli=${JFROG_CLI}" >> "${GITHUB_OUTPUT}"
+
+          SERVER_ID=""
+          if [ -n "${JFROG_URL}" ]; then
+            SERVER_ID="github-actions-docker-cleanup-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "server_id=${SERVER_ID}" >> "${GITHUB_OUTPUT}"
+
+            trim_trailing_slashes() {
+              local value="$1"
+              while [ "${value%/}" != "${value}" ]; do
+                value="${value%/}"
+              done
+              printf '%s' "${value}"
+            }
+
+            JFROG_PLATFORM_URL="$(trim_trailing_slashes "${JFROG_URL}")"
+            JFROG_ARTIFACTORY_ENDPOINT="$(trim_trailing_slashes "${JFROG_ARTIFACTORY_URL}")"
+            if [ -z "${JFROG_ARTIFACTORY_ENDPOINT}" ] && [ "${JFROG_PLATFORM_URL%/artifactory}" != "${JFROG_PLATFORM_URL}" ]; then
+              JFROG_ARTIFACTORY_ENDPOINT="${JFROG_PLATFORM_URL}"
+              JFROG_PLATFORM_URL="${JFROG_PLATFORM_URL%/artifactory}"
+              echo "::notice::JFROG_URL ends with /artifactory; using it as the Artifactory URL and ${JFROG_PLATFORM_URL} as the platform URL"
+            fi
+
+            CONFIG_URL_ARGS=(--url="${JFROG_PLATFORM_URL}")
+            if [ -n "${JFROG_ARTIFACTORY_ENDPOINT}" ]; then
+              CONFIG_URL_ARGS+=(--artifactory-url="${JFROG_ARTIFACTORY_ENDPOINT}")
+            fi
+
+            if [ -n "${JFROG_ACCESS_TOKEN}" ]; then
+              echo "Configuring JFrog CLI with JFROG_ACCESS_TOKEN"
+              printf '%s' "${JFROG_ACCESS_TOKEN}" \
+                | "${JFROG_CLI}" config add "${SERVER_ID}" \
+                    "${CONFIG_URL_ARGS[@]}" \
+                    --access-token-stdin \
+                    --interactive=false \
+                    --overwrite
+            elif [ -n "${JFROG_USERNAME}" ] && { [ -n "${JFROG_PASSWORD}" ] || [ -n "${JFROG_TOKEN}" ] || [ -n "${JFROG_API_TOKEN}" ]; }; then
+              if [ -n "${JFROG_PASSWORD}" ]; then
+                echo "Configuring JFrog CLI with JFROG_USERNAME + JFROG_PASSWORD"
+              elif [ -n "${JFROG_TOKEN}" ]; then
+                echo "Configuring JFrog CLI with JFROG_USERNAME + JFROG_TOKEN"
+              else
+                echo "Configuring JFrog CLI with JFROG_USERNAME + JFROG_API_TOKEN"
+              fi
+              printf '%s' "${JFROG_PASSWORD:-${JFROG_TOKEN:-${JFROG_API_TOKEN}}}" \
+                | "${JFROG_CLI}" config add "${SERVER_ID}" \
+                    "${CONFIG_URL_ARGS[@]}" \
+                    --user="${JFROG_USERNAME}" \
+                    --password-stdin \
+                    --basic-auth-only \
+                    --enc-password=false \
+                    --interactive=false \
+                    --overwrite
+            elif [ -n "${JFROG_TOKEN}" ]; then
+              echo "Configuring JFrog CLI with JFROG_TOKEN as access token"
+              printf '%s' "${JFROG_TOKEN}" \
+                | "${JFROG_CLI}" config add "${SERVER_ID}" \
+                    "${CONFIG_URL_ARGS[@]}" \
+                    --access-token-stdin \
+                    --interactive=false \
+                    --overwrite
+            elif [ -n "${JFROG_API_TOKEN}" ]; then
+              echo "::error::JFROG_API_TOKEN requires JFROG_USERNAME because it is configured as Basic auth password/API key, not a standalone JWT access token"
+              echo "::error::Set JFROG_USERNAME, or move a JWT/access-token style secret to JFROG_ACCESS_TOKEN"
+              exit 1
+            else
+              echo "::error::JFROG_URL is set, but no supported JFrog credential secret combination is available"
+              echo "::error::Supported combinations: JFROG_ACCESS_TOKEN, JFROG_TOKEN, JFROG_USERNAME+JFROG_API_TOKEN, JFROG_USERNAME+JFROG_PASSWORD, or JFROG_USERNAME+JFROG_TOKEN"
+              exit 1
+            fi
+
+            "${JFROG_CLI}" config use "${SERVER_ID}"
+            PING_ARGS=(--server-id="${SERVER_ID}")
+          else
+            echo "::notice::JFROG_URL secret is not set; falling back to any JFrog CLI config already present on the runner"
+            PING_ARGS=()
+          fi
+
+          if ! "${JFROG_CLI}" rt ping "${PING_ARGS[@]}"; then
+            echo "::error::JFrog CLI configuration was created, but Artifactory ping failed"
+            echo "::error::Check JFROG_URL/JFROG_ARTIFACTORY_URL and the configured credentials/permissions. Existing API tokens should use JFROG_USERNAME+JFROG_API_TOKEN."
+            exit 1
+          fi
+
+          echo "server_id=${SERVER_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Cleanup Docker tags
+        shell: bash
+        env:
+          JFROG_CLI: ${{ steps.jfrog.outputs.cli }}
+          JFROG_SERVER_ID: ${{ steps.jfrog.outputs.server_id }}
+          REPO: ${{ github.event.inputs.repo_name || 'dice-docker-local' }}
+          KEEP_COUNT: ${{ github.event.inputs.keep_count || '5' }}
+          IMAGE_INPUT: ${{ github.event.inputs.images || '' }}
+          PROTECTED_TAGS: ${{ github.event.inputs.protected_tags || '' }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run || 'true' }}
+          TRIGGER_GC: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.trigger_gc || 'false' }}
+        run: |
+          set -euo pipefail
+
+          csv_to_lines() {
+            printf '%s' "$1" \
+              | tr ',' '\n' \
+              | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+              | sed '/^$/d'
+          }
+
+          jfrog_get() {
+            if [ -n "${JFROG_SERVER_ID}" ]; then
+              "${JFROG_CLI}" rt curl --server-id="${JFROG_SERVER_ID}" -s -XGET "$1"
+            else
+              "${JFROG_CLI}" rt curl -s -XGET "$1"
+            fi
+          }
+
+          jfrog_get_optional() {
+            if [ -n "${JFROG_SERVER_ID}" ]; then
+              "${JFROG_CLI}" rt curl --server-id="${JFROG_SERVER_ID}" -s -XGET "$1" 2>/dev/null || true
+            else
+              "${JFROG_CLI}" rt curl -s -XGET "$1" 2>/dev/null || true
+            fi
+          }
+
+          jfrog_delete_json() {
+            local path="$1"
+            local body="$2"
+            if [ -n "${JFROG_SERVER_ID}" ]; then
+              "${JFROG_CLI}" rt curl --server-id="${JFROG_SERVER_ID}" -s -XDELETE -H "Content-Type: application/json" -d "$body" "$path"
+            else
+              "${JFROG_CLI}" rt curl -s -XDELETE -H "Content-Type: application/json" -d "$body" "$path"
+            fi
+          }
+
+          jfrog_post() {
+            if [ -n "${JFROG_SERVER_ID}" ]; then
+              "${JFROG_CLI}" rt curl --server-id="${JFROG_SERVER_ID}" -s -XPOST "$1"
+            else
+              "${JFROG_CLI}" rt curl -s -XPOST "$1"
+            fi
+          }
+
+          json_error_status() {
+            printf '%s' "$1" \
+              | python3 -c 'import json,sys; data=json.load(sys.stdin); statuses=[]; statuses += [data.get("status")] if isinstance(data, dict) else []; statuses += [e.get("status") for e in (data.get("errors") or []) if isinstance(e, dict)] if isinstance(data, dict) else []; codes=[int(s) for s in statuses if str(s).isdigit()]; print(next((str(c) for c in codes if c >= 400), ""))' 2>/dev/null \
+              || true
+          }
+
+          ensure_api_ok() {
+            local body="$1"
+            local label="$2"
+            local status
+            status="$(json_error_status "${body}")"
+            if [ -n "${status}" ]; then
+              echo "::error::${label} returned HTTP ${status}: ${body:0:500}"
+              return 1
+            fi
+          }
+
+          is_protected() {
+            local tag="$1"
+            local protected
+            for protected in "${PROTECTED[@]}"; do
+              if [ "${tag}" = "${protected}" ]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          docker_delete_payload() {
+            python3 -c 'import json,sys; print(json.dumps({"dockerRepository": sys.argv[1], "tag": sys.argv[2]}, separators=(",", ":")))' "$1" "$2"
+          }
+
+          delete_docker_tag() {
+            local image="$1"
+            local tag="$2"
+            local payload
+            payload="$(docker_delete_payload "${image}" "${tag}")"
+            jfrog_delete_json "/api/docker/${REPO}/v2/delete" "${payload}"
+          }
+
+          if [ -z "${REPO}" ]; then
+            echo "::error::repo_name is required"
+            exit 1
+          fi
+
+          if ! [[ "${KEEP_COUNT}" =~ ^[0-9]+$ ]] || [ "${KEEP_COUNT}" -lt 1 ]; then
+            echo "::error::keep_count must be a positive integer"
+            exit 1
+          fi
+
+          mapfile -t REQUESTED_IMAGES < <(csv_to_lines "${IMAGE_INPUT}")
+          mapfile -t PROTECTED < <(csv_to_lines "${PROTECTED_TAGS}")
+
+          echo "=== JFrog Docker Retention Cleanup ==="
+          echo "Repository:     ${REPO}"
+          echo "Keep count:     ${KEEP_COUNT}"
+          echo "Images:         $([ ${#REQUESTED_IMAGES[@]} -gt 0 ] && printf '%s' "${REQUESTED_IMAGES[*]}" || printf 'all')"
+          echo "Protected tags: $([ ${#PROTECTED[@]} -gt 0 ] && printf '%s' "${PROTECTED[*]}" || printf 'none')"
+          echo "Dry run:        ${DRY_RUN}"
+          echo "Trigger GC:     ${TRIGGER_GC}"
+          echo ""
+
+          echo "Verifying Docker repository '${REPO}'..."
+          if ! REPO_INFO="$(jfrog_get "/api/repositories/${REPO}")"; then
+            echo "::error::Repository '${REPO}' was not found or access was denied"
+            exit 1
+          fi
+          ensure_api_ok "${REPO_INFO}" "Repository lookup"
+
+          REPO_TYPE="$(
+            printf '%s' "${REPO_INFO}" \
+              | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("packageType", ""))'
+          )"
+          if [ "${REPO_TYPE}" != "docker" ]; then
+            echo "::error::Repository '${REPO}' is not a Docker repository (packageType=${REPO_TYPE})"
+            exit 1
+          fi
+          echo "Repository verified"
+          echo ""
+
+          if [ ${#REQUESTED_IMAGES[@]} -gt 0 ]; then
+            IMAGES=("${REQUESTED_IMAGES[@]}")
+          else
+            if ! CATALOG_JSON="$(jfrog_get "/api/docker/${REPO}/v2/_catalog")"; then
+              echo "::error::Failed to fetch Docker catalog for '${REPO}'"
+              exit 1
+            fi
+            ensure_api_ok "${CATALOG_JSON}" "Docker catalog lookup"
+
+            mapfile -t IMAGES < <(
+              printf '%s' "${CATALOG_JSON}" \
+                | python3 -c 'import json,sys; data=json.load(sys.stdin); [print(x) for x in data.get("repositories", [])]'
+            )
+          fi
+
+          if [ ${#IMAGES[@]} -eq 0 ]; then
+            echo "No images found. Nothing to clean."
+            exit 0
+          fi
+
+          TOTAL_PROTECTED=0
+          TOTAL_KEPT=0
+          TOTAL_WOULD_DELETE=0
+          TOTAL_DELETED=0
+          TOTAL_ERRORS=0
+
+          echo "Found ${#IMAGES[@]} image(s)"
+          echo ""
+
+          for IMAGE in "${IMAGES[@]}"; do
+            echo "--- ${IMAGE} ---"
+
+            if ! TAGS_JSON="$(jfrog_get "/api/docker/${REPO}/v2/${IMAGE}/tags/list")"; then
+              echo "  ::warning::Failed to fetch tags, skipping"
+              TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+              continue
+            fi
+            if ! ensure_api_ok "${TAGS_JSON}" "Tag lookup for ${IMAGE}"; then
+              TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+              continue
+            fi
+
+            mapfile -t ALL_TAGS < <(
+              printf '%s' "${TAGS_JSON}" \
+                | python3 -c 'import json,sys; data=json.load(sys.stdin); [print(x) for x in data.get("tags") or []]'
+            )
+
+            if [ ${#ALL_TAGS[@]} -eq 0 ]; then
+              echo "  No tags found"
+              continue
+            fi
+
+            DELETABLE_TAGS=()
+            for TAG in "${ALL_TAGS[@]}"; do
+              if is_protected "${TAG}"; then
+                echo "  [PROTECTED] ${TAG}"
+                TOTAL_PROTECTED=$((TOTAL_PROTECTED + 1))
+              else
+                DELETABLE_TAGS+=("${TAG}")
+              fi
+            done
+
+            if [ ${#DELETABLE_TAGS[@]} -le "${KEEP_COUNT}" ]; then
+              echo "  ${#DELETABLE_TAGS[@]} deletable tag(s) <= keep count (${KEEP_COUNT}), skipping"
+              TOTAL_KEPT=$((TOTAL_KEPT + ${#DELETABLE_TAGS[@]}))
+              echo ""
+              continue
+            fi
+
+            TAG_INFO_FILE="$(mktemp)"
+            for TAG in "${DELETABLE_TAGS[@]}"; do
+              STORAGE_JSON="$(jfrog_get_optional "/api/storage/${REPO}/${IMAGE}/${TAG}/manifest.json")"
+              if [ -z "${STORAGE_JSON}" ] || [ -n "$(json_error_status "${STORAGE_JSON}")" ]; then
+                STORAGE_JSON="$(jfrog_get_optional "/api/storage/${REPO}/${IMAGE}/${TAG}")"
+              fi
+
+              MODIFIED="$(
+                printf '%s' "${STORAGE_JSON}" \
+                  | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("lastModified") or data.get("created") or "1970-01-01T00:00:00Z")' 2>/dev/null \
+                  || true
+              )"
+              MODIFIED="${MODIFIED:-1970-01-01T00:00:00Z}"
+              printf '%s\t%s\n' "${MODIFIED}" "${TAG}" >> "${TAG_INFO_FILE}"
+            done
+
+            mapfile -t SORTED_TAGS < <(sort -r "${TAG_INFO_FILE}" | cut -f2-)
+            rm -f "${TAG_INFO_FILE}"
+
+            DELETE_COUNT=$(( ${#SORTED_TAGS[@]} - KEEP_COUNT ))
+            echo "  Total tags: ${#ALL_TAGS[@]}"
+            echo "  Keeping newest ${KEEP_COUNT}, deleting ${DELETE_COUNT}"
+
+            for INDEX in "${!SORTED_TAGS[@]}"; do
+              TAG="${SORTED_TAGS[$INDEX]}"
+
+              if [ "${INDEX}" -lt "${KEEP_COUNT}" ]; then
+                echo "  [KEEP]    ${TAG}"
+                TOTAL_KEPT=$((TOTAL_KEPT + 1))
+              elif [ "${DRY_RUN}" = "true" ]; then
+                echo "  [DRY-RUN] ${TAG}"
+                TOTAL_WOULD_DELETE=$((TOTAL_WOULD_DELETE + 1))
+              else
+                if DELETE_RESPONSE="$(delete_docker_tag "${IMAGE}" "${TAG}")" && ensure_api_ok "${DELETE_RESPONSE}" "Delete ${IMAGE}:${TAG}"; then
+                  echo "  [DELETED] ${TAG}"
+                  TOTAL_DELETED=$((TOTAL_DELETED + 1))
+                else
+                  echo "  [FAILED]  ${TAG}"
+                  TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+                fi
+              fi
+            done
+            echo ""
+          done
+
+          GC_TRIGGERED=0
+          if [ "${DRY_RUN}" != "true" ] && [ "${TRIGGER_GC}" = "true" ] && [ "${TOTAL_DELETED}" -gt 0 ]; then
+            echo "Triggering Artifactory storage garbage collection..."
+            if GC_RESPONSE="$(jfrog_post "/api/system/storage/gc")" && ensure_api_ok "${GC_RESPONSE}" "Storage garbage collection"; then
+              echo "Storage garbage collection triggered"
+              GC_TRIGGERED=1
+            else
+              echo "::warning::Failed to trigger storage garbage collection; this usually requires Artifactory admin permission"
+              TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+            fi
+            echo ""
+          elif [ "${DRY_RUN}" != "true" ] && [ "${TOTAL_DELETED}" -gt 0 ]; then
+            echo "Storage garbage collection was not triggered. Deleted Docker blobs may remain in filestore until Artifactory trash retention and GC run."
+            echo ""
+          fi
+
+          echo "=== Cleanup Summary ==="
+          echo "Protected:    ${TOTAL_PROTECTED}"
+          echo "Kept:         ${TOTAL_KEPT}"
+          echo "Would delete: ${TOTAL_WOULD_DELETE}"
+          echo "Deleted:      ${TOTAL_DELETED}"
+          echo "GC triggered: ${GC_TRIGGERED}"
+          echo "Errors:       ${TOTAL_ERRORS}"
+
+          {
+            echo "## JFrog Docker Retention Cleanup"
+            echo ""
+            echo "| Metric | Count |"
+            echo "| --- | ---: |"
+            echo "| Protected | ${TOTAL_PROTECTED} |"
+            echo "| Kept | ${TOTAL_KEPT} |"
+            echo "| Would delete | ${TOTAL_WOULD_DELETE} |"
+            echo "| Deleted | ${TOTAL_DELETED} |"
+            echo "| GC triggered | ${GC_TRIGGERED} |"
+            echo "| Errors | ${TOTAL_ERRORS} |"
+            echo ""
+            echo "**Repository:** \`${REPO}\`"
+            echo "**Keep count:** ${KEEP_COUNT} per image"
+            echo "**Dry run:** ${DRY_RUN}"
+            echo "**Trigger GC:** ${TRIGGER_GC}"
+            echo "**Delete API:** \`/api/docker/${REPO}/v2/delete\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${TOTAL_ERRORS}" -gt 0 ]; then
+            echo "::warning::Cleanup completed with ${TOTAL_ERRORS} error(s)"
+          fi
+
+      - name: Remove temporary JFrog CLI config
+        if: always() && steps.jfrog.outputs.server_id != ''
+        shell: bash
+        env:
+          JFROG_CLI: ${{ steps.jfrog.outputs.cli }}
+          JFROG_SERVER_ID: ${{ steps.jfrog.outputs.server_id }}
+        run: |
+          set -euo pipefail
+          "${JFROG_CLI}" config remove "${JFROG_SERVER_ID}" --quiet || true
+

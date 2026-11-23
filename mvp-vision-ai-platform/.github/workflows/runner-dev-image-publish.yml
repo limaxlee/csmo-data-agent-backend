@@ -1,0 +1,82 @@
+name: Publish Runner Development Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_tag:
+        description: 'Runner image tag'
+        required: true
+        type: string
+
+concurrency:
+  group: runner-dev-image-publish
+  cancel-in-progress: false
+
+env:
+  REGISTRY: dice-docker-local.bart.sec.samsung.net
+  DOCKER_BUILDKIT: "1"
+
+jobs:
+  build:
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Check if internal mirror
+        env:
+          ENABLE_PUBLISH: ${{ vars.ENABLE_HELM_PUBLISH }}
+        run: |
+          if [ "$ENABLE_PUBLISH" != "true" ]; then
+            echo "::error::Set ENABLE_HELM_PUBLISH=true in the internal mirror"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Select image tag
+        id: tag
+        shell: bash
+        run: echo "value=dev-${GITHUB_SHA:0:7}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Docker client config
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/.docker"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/.docker" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: code-actions/docker-setup-buildx-action@v3
+        with:
+          name: build-runner-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          driver: docker-container
+          use: true
+
+      - name: Login to Registry
+        uses: code-actions/docker-login-action@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Runner Development Image
+        uses: code-actions/docker-build-push-action@v5
+        with:
+          context: .
+          file: ./runner/Dockerfile.dev
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/dice-runner:${{ steps.tag.outputs.value }}
+            ${{ env.REGISTRY }}/dice-runner:dev
+          build-args: |
+            RUNNER_IMAGE=${{ env.REGISTRY }}/dice-runner:${{ inputs.runner_tag }}
+
+      - name: Report image
+        shell: bash
+        env:
+          BASE_RUNNER_TAG: ${{ inputs.runner_tag }}
+        run: |
+          echo "Base image: $REGISTRY/dice-runner:$BASE_RUNNER_TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published image: $REGISTRY/dice-runner:${{ steps.tag.outputs.value }}" >> "$GITHUB_STEP_SUMMARY"
+

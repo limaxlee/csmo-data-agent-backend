@@ -1,0 +1,258 @@
+name: Promote Stage to Production
+
+run-name: Promote stage to production (${{ inputs.components }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      components:
+        description: 'Stage image tags to promote (all, platform, user-service, web-auth, docs, dashboard, backend, frontend, dashboard-mcp, mcp, trainers, dataset-cache, runner, inference-gateway, labeler, labeler-backend, labeler-frontend, dice-bot)'
+        required: true
+        default: 'all'
+        type: string
+      confirmation:
+        description: 'Type PRODUCTION to confirm the deployment'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: argocd-production-promotion
+  cancel-in-progress: false
+
+env:
+  ARGOCD_STAGE_APP_NAME: dice-stage
+  ARGOCD_PROD_APP_NAME: dice
+  ARGOCD_CLI_URL: ${{ vars.ARGOCD_CLI_URL || 'https://bart.sec.samsung.net/artifactory/dice-generic-local/argocd-linux-amd64' }}
+  ARGOCD_CLI_SHA256: ${{ vars.ARGOCD_CLI_SHA256 || '' }}
+
+jobs:
+  promote:
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Validate Production Confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "PRODUCTION" ]; then
+            echo "::error::Production promotion requires the exact confirmation PRODUCTION"
+            exit 1
+          fi
+
+      - name: Install ArgoCD CLI
+        shell: bash
+        env:
+          ARGOCD_CLI_USERNAME: ${{ secrets.ARGOCD_CLI_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME || secrets.DOCKER_USERNAME }}
+          ARGOCD_CLI_PASSWORD: ${{ secrets.ARGOCD_CLI_PASSWORD || secrets.ARTIFACTORY_TOKEN || secrets.BART_TOKEN || secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          TOOL_DIR="${RUNNER_TEMP}/argocd-cli"
+          mkdir -p "$TOOL_DIR"
+
+          CURL_ARGS=(-fsSL --retry 3 --retry-delay 5)
+          if [ -n "${ARGOCD_CLI_USERNAME:-}" ] && [ -n "${ARGOCD_CLI_PASSWORD:-}" ]; then
+            CURL_ARGS+=(-u "${ARGOCD_CLI_USERNAME}:${ARGOCD_CLI_PASSWORD}")
+          fi
+
+          curl "${CURL_ARGS[@]}" "$ARGOCD_CLI_URL" -o "$TOOL_DIR/argocd"
+
+          if [ -n "${ARGOCD_CLI_SHA256:-}" ]; then
+            echo "${ARGOCD_CLI_SHA256}  ${TOOL_DIR}/argocd" | sha256sum -c -
+          fi
+
+          chmod +x "$TOOL_DIR/argocd"
+          echo "$TOOL_DIR" >> "$GITHUB_PATH"
+          "$TOOL_DIR/argocd" version --client
+
+      - name: Validate Stage Application
+        id: stage
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          ARGOCD_ARGS=(
+            --server "$ARGOCD_SERVER"
+            --auth-token "$ARGOCD_AUTH_TOKEN"
+            --grpc-web-root-path /argo
+            --insecure
+          )
+          STAGE_JSON="${RUNNER_TEMP}/stage-app.json"
+          argocd app get "$ARGOCD_STAGE_APP_NAME" --refresh -o json "${ARGOCD_ARGS[@]}" > "$STAGE_JSON"
+
+          SYNC_STATUS="$(jq -r '.status.sync.status // "Unknown"' "$STAGE_JSON")"
+          HEALTH_STATUS="$(jq -r '.status.health.status // "Unknown"' "$STAGE_JSON")"
+          OPERATION_PHASE="$(jq -r '.status.operationState.phase // "Unknown"' "$STAGE_JSON")"
+          REVISION="$(jq -r '.status.sync.revision // empty' "$STAGE_JSON")"
+
+          if [ "$SYNC_STATUS" != "Synced" ] || [ "$HEALTH_STATUS" != "Healthy" ]; then
+            echo "::error::Stage must be Synced and Healthy (sync=$SYNC_STATUS health=$HEALTH_STATUS)"
+            exit 1
+          fi
+          if [ "$OPERATION_PHASE" = "Running" ]; then
+            echo "::error::Stage has an operation in progress"
+            exit 1
+          fi
+          if ! [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Stage live revision is not an immutable Git SHA"
+            exit 1
+          fi
+
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
+          echo "Validated stage at revision $REVISION"
+
+      - name: Promote Stage Revision and Image Tags
+        env:
+          COMPONENTS: ${{ inputs.components }}
+          STAGE_REVISION: ${{ steps.stage.outputs.revision }}
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          STAGE_JSON="${RUNNER_TEMP}/stage-app.json"
+          NORMALIZED="$(printf '%s' "$COMPONENTS" | tr '[:upper:]' '[:lower:]' | tr '_' '-' | tr -d '[:space:]')"
+          if [ -z "$NORMALIZED" ]; then
+            echo "::error::At least one component is required"
+            exit 1
+          fi
+
+          declare -A SELECTED=()
+          select_param() {
+            SELECTED["$1"]=1
+          }
+          select_trainers() {
+            select_param platform.training.frameworks.ultralytics.image_tag
+            select_param platform.training.frameworks.huggingface.image_tag
+            select_param platform.training.frameworks.vfm-v1.image_tag
+            select_param platform.training.frameworks.vfm-v1-cu128.image_tag
+            select_param platform.training.frameworks.vfm-v3-det-bastion.image_tag
+            select_param platform.training.frameworks.dice_v1.image_tag
+            select_param platform.training.frameworks.timm.image_tag
+            select_param platform.training.frameworks.space.image_tag
+            select_param platform.training.frameworks.openmm-cu118.image_tag
+            select_param platform.training.frameworks.openmm-cu128.image_tag
+          }
+          select_labeler() {
+            select_param sharedInference.image.tag
+            select_param labeler.backend.image.tag
+            select_param labeler.frontend.image.tag
+          }
+          select_all() {
+            select_param dashboard.enabled
+            select_param userService.image.tag
+            select_param webAuth.image.tag
+            select_param dashboard.frontend.image.tag
+            select_param dashboard.backend.image.tag
+            select_param docs.image.tag
+            select_param platform.backend.image.tag
+            select_param platform.frontend.image.tag
+            select_param platform.dashboardMcp.image.tag
+            select_param platform.mcp.image.tag
+            select_param platform.runner.image.tag
+            select_param diceBot.image.tag
+            select_param platform.training.datasetCache.image.tag
+            select_trainers
+            select_labeler
+          }
+
+          IFS=',' read -ra REQUESTED <<< "$NORMALIZED"
+          for COMPONENT in "${REQUESTED[@]}"; do
+            case "$COMPONENT" in
+              all) select_all ;;
+              platform)
+                select_param platform.backend.image.tag
+                select_param platform.frontend.image.tag
+                ;;
+              web-auth) select_param webAuth.image.tag ;;
+              dashboard)
+                select_param dashboard.enabled
+                select_param dashboard.frontend.image.tag
+                select_param dashboard.backend.image.tag
+                ;;
+              user-service) select_param userService.image.tag ;;
+              docs) select_param docs.image.tag ;;
+              backend) select_param platform.backend.image.tag ;;
+              frontend) select_param platform.frontend.image.tag ;;
+              dashboard-mcp) select_param platform.dashboardMcp.image.tag ;;
+              mcp) select_param platform.mcp.image.tag ;;
+              trainers) select_trainers ;;
+              dataset-cache) select_param platform.training.datasetCache.image.tag ;;
+              runner) select_param platform.runner.image.tag ;;
+              inference-gateway) select_param sharedInference.image.tag ;;
+              labeler) select_labeler ;;
+              labeler-backend) select_param labeler.backend.image.tag ;;
+              labeler-frontend) select_param labeler.frontend.image.tag ;;
+              dice-bot) select_param diceBot.image.tag ;;
+              *)
+                echo "::error::Unknown component: $COMPONENT"
+                exit 1
+                ;;
+            esac
+          done
+
+          ARGOCD_ARGS=(
+            --server "$ARGOCD_SERVER"
+            --auth-token "$ARGOCD_AUTH_TOKEN"
+            --grpc-web-root-path /argo
+            --insecure
+          )
+          SET_ARGS=(app set "$ARGOCD_PROD_APP_NAME" --revision "$STAGE_REVISION")
+
+          while IFS= read -r PARAM; do
+            VALUE="$(jq -r --arg name "$PARAM" '[.spec.source.helm.parameters[]? | select(.name == $name) | .value] | last // empty' "$STAGE_JSON")"
+            if [ -z "$VALUE" ]; then
+              echo "::error::Stage does not define Helm parameter $PARAM"
+              exit 1
+            fi
+            if ! [[ "$VALUE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::Unsafe image tag in stage parameter $PARAM"
+              exit 1
+            fi
+            if [ "$PARAM" = "labeler.frontend.image.tag" ] && [[ "$VALUE" == *-candidate-upload ]]; then
+              echo "::error::Candidate upload test images are staging-only; rebuild with candidate_upload_enabled=false"
+              exit 1
+            fi
+            SET_ARGS+=(--helm-set "$PARAM=$VALUE")
+            echo "Promoting $PARAM=$VALUE"
+          done < <(printf '%s\n' "${!SELECTED[@]}" | sort)
+
+          argocd "${SET_ARGS[@]}" "${ARGOCD_ARGS[@]}"
+
+      - name: Sync Production Application
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          ARGOCD_ARGS=(
+            --server "$ARGOCD_SERVER"
+            --auth-token "$ARGOCD_AUTH_TOKEN"
+            --grpc-web-root-path /argo
+            --insecure
+          )
+
+          argocd app sync "$ARGOCD_PROD_APP_NAME" --prune --async "${ARGOCD_ARGS[@]}"
+          echo "Production sync requested; continuing without waiting for health."
+
+      - name: Summary
+        env:
+          COMPONENTS: ${{ inputs.components }}
+          STAGE_REVISION: ${{ steps.stage.outputs.revision }}
+        run: |
+          {
+            echo "## Production Promotion"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Source application | \`$ARGOCD_STAGE_APP_NAME\` |"
+            echo "| Target application | \`$ARGOCD_PROD_APP_NAME\` |"
+            echo "| Git revision | \`$STAGE_REVISION\` |"
+            echo "| Components | \`$COMPONENTS\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+

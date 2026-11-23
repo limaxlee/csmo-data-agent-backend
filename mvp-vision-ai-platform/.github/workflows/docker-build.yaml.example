@@ -1,0 +1,410 @@
+# Docker Image Build & Push + ArgoCD Sync
+#
+# This workflow builds Docker images with CalVer tagging and syncs to ArgoCD.
+# Designed for internal Git mirror with scheduled sync from GitHub.
+#
+# CalVer Format: YYYY.MM.DD-<short-sha>
+# Example: 2025.12.15-abc1234
+#
+# Flow:
+#   1. Detect changed components (backend, frontend, trainers)
+#   2. Build & push Docker images with CalVer tag
+#   3. Update ArgoCD Application with new image tags
+#   4. Trigger ArgoCD sync
+#
+# Required Secrets:
+#   DOCKER_REGISTRY: Docker registry URL (e.g., your-company.jfrog.io)
+#   DOCKER_USERNAME: Registry username
+#   DOCKER_PASSWORD: Registry password or token
+#   ARGOCD_SERVER: ArgoCD server URL (e.g., argocd.your-company.com)
+#   ARGOCD_AUTH_TOKEN: ArgoCD auth token (Settings → Accounts → Generate New)
+#
+# Required Variables:
+#   ENABLE_DOCKER_BUILD: Set to "true" to enable (internal mirror only)
+#
+# Triggers:
+#   - Push to main/master branch (source changes)
+#   - Manual dispatch with component selection
+
+name: Docker Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'platform/backend/**'
+      - 'platform/frontend/**'
+      - 'platform/trainers/**'
+
+  workflow_dispatch:
+    inputs:
+      components:
+        description: 'Components to build (all, or comma-separated: backend,frontend,trainers)'
+        required: false
+        default: 'all'
+        type: string
+      tag_override:
+        description: 'Override image tag (leave empty for CalVer)'
+        required: false
+        type: string
+      skip_sync:
+        description: 'Skip ArgoCD sync after build'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+  ARGOCD_APP_NAME: vision-ai-platform
+  # Internal registry mirror for base images (e.g., python:3.11-slim from docker.io)
+  # Set repository variable REGISTRY_MIRROR if docker.io is blocked
+  REGISTRY_MIRROR: ${{ vars.REGISTRY_MIRROR || '' }}
+  # Internal registry mirror for ghcr.io images (e.g., astral-sh/uv)
+  # Set repository variable GHCR_MIRROR if ghcr.io is blocked
+  GHCR_MIRROR: ${{ vars.GHCR_MIRROR || 'ghcr.io/' }}
+
+jobs:
+  # Guard: Only run in internal mirror repository
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check if internal mirror
+        id: check
+        run: |
+          if [ "${{ vars.ENABLE_DOCKER_BUILD }}" = "true" ]; then
+            echo "Running in internal mirror repository"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Skipping - ENABLE_DOCKER_BUILD is not set to 'true'"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+  # Detect which components changed
+  detect-changes:
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      trainers: ${{ steps.changes.outputs.trainers }}
+      trainer_list: ${{ steps.trainers.outputs.list }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changes
+        id: changes
+        run: |
+          # For push events: build all (paths filter already ensures relevant changes)
+          # For workflow_dispatch: use input value
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            COMPONENTS="${{ github.event.inputs.components }}"
+          else
+            # Push event - paths filter ensures platform/* changed, build all
+            COMPONENTS="all"
+          fi
+
+          echo "Components to build: $COMPONENTS"
+
+          if [ "$COMPONENTS" = "all" ] || [ -z "$COMPONENTS" ]; then
+            echo "backend=true" >> $GITHUB_OUTPUT
+            echo "frontend=true" >> $GITHUB_OUTPUT
+            echo "trainers=true" >> $GITHUB_OUTPUT
+          else
+            # Parse comma-separated list
+            if echo "$COMPONENTS" | grep -q "backend"; then
+              echo "backend=true" >> $GITHUB_OUTPUT
+            else
+              echo "backend=false" >> $GITHUB_OUTPUT
+            fi
+            if echo "$COMPONENTS" | grep -q "frontend"; then
+              echo "frontend=true" >> $GITHUB_OUTPUT
+            else
+              echo "frontend=false" >> $GITHUB_OUTPUT
+            fi
+            if echo "$COMPONENTS" | grep -q "trainers"; then
+              echo "trainers=true" >> $GITHUB_OUTPUT
+            else
+              echo "trainers=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: List trainers
+        id: trainers
+        run: |
+          # Find all trainer directories with Dockerfile
+          TRAINERS=$(find platform/trainers -maxdepth 2 -name "Dockerfile" -exec dirname {} \; | xargs -I{} basename {} | tr '\n' ',' | sed 's/,$//')
+          echo "list=$TRAINERS" >> $GITHUB_OUTPUT
+          echo "Found trainers: $TRAINERS"
+
+  # Generate CalVer tag
+  generate-tag:
+    needs: [guard, detect-changes]
+    if: needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      date: ${{ steps.tag.outputs.date }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate CalVer tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag_override }}" ]; then
+            TAG="${{ github.event.inputs.tag_override }}"
+          else
+            DATE=$(date +'%Y.%m.%d')
+            SHORT_SHA=$(git rev-parse --short=7 HEAD)
+            TAG="${DATE}-${SHORT_SHA}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "date=$(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
+          echo "Generated tag: $TAG"
+
+  # Build Backend
+  build-backend:
+    needs: [guard, detect-changes, generate-tag]
+    if: |
+      needs.guard.outputs.should_run == 'true' &&
+      needs.detect-changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./platform/backend
+          file: ./platform/backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/vision-ai-backend:${{ needs.generate-tag.outputs.tag }}
+            ${{ env.REGISTRY }}/vision-ai-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ needs.generate-tag.outputs.date }}
+            VERSION=${{ needs.generate-tag.outputs.tag }}
+            REGISTRY_MIRROR=${{ env.REGISTRY_MIRROR }}
+            GHCR_MIRROR=${{ env.GHCR_MIRROR }}
+
+  # Build Frontend
+  build-frontend:
+    needs: [guard, detect-changes, generate-tag]
+    if: |
+      needs.guard.outputs.should_run == 'true' &&
+      needs.detect-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./platform/frontend
+          file: ./platform/frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/vision-ai-frontend:${{ needs.generate-tag.outputs.tag }}
+            ${{ env.REGISTRY }}/vision-ai-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ needs.generate-tag.outputs.date }}
+            VERSION=${{ needs.generate-tag.outputs.tag }}
+            REGISTRY_MIRROR=${{ env.REGISTRY_MIRROR }}
+            GHCR_MIRROR=${{ env.GHCR_MIRROR }}
+
+  # Build Trainers (matrix)
+  build-trainers:
+    needs: [guard, detect-changes, generate-tag]
+    if: |
+      needs.guard.outputs.should_run == 'true' &&
+      needs.detect-changes.outputs.trainers == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - trainer: ultralytics
+            image: trainer-ultralytics
+          - trainer: huggingface
+            image: trainer-huggingface
+          - trainer: timm
+            image: trainer-timm
+          - trainer: vfm-v1
+            image: trainer-vfm-v1
+          - trainer: openmm
+            image: trainer-openmm-cu118
+          - trainer: openmm-cu128
+            image: trainer-openmm-cu128
+          - trainer: space
+            image: space-adapter
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check if trainer exists
+        id: check
+        run: |
+          if [ -f "platform/trainers/${{ matrix.trainer }}/Dockerfile" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "::warning::Trainer ${{ matrix.trainer }} does not have a Dockerfile"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Registry
+        if: steps.check.outputs.exists == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and Push Trainer
+        if: steps.check.outputs.exists == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          # All trainers use platform/ as build context so Dockerfiles can
+          # reference shared paths (dice-platform-runtime/, envs/, etc.)
+          context: ./platform
+          file: ./platform/trainers/${{ matrix.trainer }}/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ needs.generate-tag.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ needs.generate-tag.outputs.date }}
+            VERSION=${{ needs.generate-tag.outputs.tag }}
+            REGISTRY_MIRROR=${{ env.REGISTRY_MIRROR }}
+            GHCR_MIRROR=${{ env.GHCR_MIRROR }}
+
+  # ArgoCD Sync - Update image tags and sync
+  argocd-sync:
+    needs: [guard, generate-tag, detect-changes, build-backend, build-frontend, build-trainers]
+    if: |
+      always() &&
+      needs.guard.outputs.should_run == 'true' &&
+      needs.generate-tag.result == 'success' &&
+      github.event.inputs.skip_sync != 'true' &&
+      (needs.build-backend.result == 'success' || needs.build-backend.result == 'skipped') &&
+      (needs.build-frontend.result == 'success' || needs.build-frontend.result == 'skipped') &&
+      (needs.build-trainers.result == 'success' || needs.build-trainers.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/
+
+      - name: ArgoCD Login
+        run: |
+          argocd login ${{ secrets.ARGOCD_SERVER }} \
+            --auth-token ${{ secrets.ARGOCD_AUTH_TOKEN }} \
+            --grpc-web \
+            --insecure
+
+      - name: Update Backend Image Tag
+        if: needs.detect-changes.outputs.backend == 'true' && needs.build-backend.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} \
+            --helm-set backend.image.tag=${{ needs.generate-tag.outputs.tag }}
+          echo "Updated backend image tag to ${{ needs.generate-tag.outputs.tag }}"
+
+      - name: Update Frontend Image Tag
+        if: needs.detect-changes.outputs.frontend == 'true' && needs.build-frontend.result == 'success'
+        run: |
+          argocd app set ${{ env.ARGOCD_APP_NAME }} \
+            --helm-set frontend.image.tag=${{ needs.generate-tag.outputs.tag }}
+          echo "Updated frontend image tag to ${{ needs.generate-tag.outputs.tag }}"
+
+      - name: Update Trainer Image Tags
+        if: needs.detect-changes.outputs.trainers == 'true' && needs.build-trainers.result == 'success'
+        run: |
+          # Update default tag for all trainers
+          argocd app set ${{ env.ARGOCD_APP_NAME }} \
+            --helm-set training.registry.defaultTag=${{ needs.generate-tag.outputs.tag }}
+          echo "Updated trainer default tag to ${{ needs.generate-tag.outputs.tag }}"
+
+      - name: Sync ArgoCD Application
+        run: |
+          echo "Triggering ArgoCD sync..."
+          argocd app sync ${{ env.ARGOCD_APP_NAME }} --prune --timeout 300
+          echo "Sync completed"
+
+      - name: Wait for Rollout
+        run: |
+          echo "Waiting for application to be healthy..."
+          argocd app wait ${{ env.ARGOCD_APP_NAME }} --timeout 600 --health
+          echo "Application is healthy"
+
+  # Summary
+  summary:
+    needs: [guard, generate-tag, build-backend, build-frontend, build-trainers, argocd-sync]
+    if: |
+      always() &&
+      needs.guard.outputs.should_run == 'true' &&
+      needs.generate-tag.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "## Docker Build & Deploy Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Image Tag" >> $GITHUB_STEP_SUMMARY
+          echo "\`${{ needs.generate-tag.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend | ${{ needs.build-backend.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | ${{ needs.build-frontend.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trainers | ${{ needs.build-trainers.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ArgoCD Sync" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ needs.argocd-sync.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Images" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.REGISTRY }}/vision-ai-backend:${{ needs.generate-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.REGISTRY }}/vision-ai-frontend:${{ needs.generate-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.REGISTRY }}/trainer-*:${{ needs.generate-tag.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+

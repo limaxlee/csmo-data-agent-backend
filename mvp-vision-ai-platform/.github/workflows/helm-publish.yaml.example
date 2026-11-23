@@ -1,0 +1,259 @@
+# Helm Chart Publish to JFrog
+#
+# This workflow packages and publishes the Helm chart to JFrog Artifactory.
+# Designed for internal Git mirror with scheduled sync from GitHub.
+#
+# Version Auto-Increment:
+#   - Analyzes commit messages since last tag
+#   - feat: → minor bump (1.0.0 → 1.1.0)
+#   - fix/chore/etc: → patch bump (1.0.0 → 1.0.1)
+#   - BREAKING CHANGE: → major bump (1.0.0 → 2.0.0)
+#
+# Required Secrets:
+#   JFROG_URL: JFrog Artifactory URL (e.g., https://your-company.jfrog.io/artifactory)
+#   JFROG_HELM_REPO: Helm repository name (e.g., helm-local)
+#   JFROG_USERNAME: JFrog username (optional if using token)
+#   JFROG_TOKEN: JFrog API token or password
+#
+# Triggers:
+#   - Push to main/master branch (chart changes)
+#   - Manual dispatch with version override
+#   - Scheduled (for cron-synced mirrors)
+
+name: Helm Publish
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'infrastructure/helm/vision-ai-platform/**'
+
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Override chart version (leave empty for auto-increment)'
+        required: false
+        type: string
+      bump_type:
+        description: 'Version bump type (ignored if version_override is set)'
+        required: false
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+        default: auto
+      force_publish:
+        description: 'Force publish even if version exists'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CHART_PATH: infrastructure/helm/vision-ai-platform
+  CHART_NAME: vision-ai-platform
+
+jobs:
+  # Guard: Only run in internal mirror repository
+  # Set repository variable ENABLE_HELM_PUBLISH=true in internal mirror
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check if internal mirror
+        id: check
+        run: |
+          if [ "${{ vars.ENABLE_HELM_PUBLISH }}" = "true" ]; then
+            echo "Running in internal mirror repository"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Skipping - ENABLE_HELM_PUBLISH is not set to 'true'"
+            echo "::warning::Set repository variable ENABLE_HELM_PUBLISH=true in internal mirror"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+  publish:
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for version calculation
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.13.0'
+
+      - name: Calculate Version
+        id: chart_version
+        run: |
+          # If version override is provided, use it
+          if [ -n "${{ github.event.inputs.version_override }}" ]; then
+            VERSION="${{ github.event.inputs.version_override }}"
+            echo "Using override version: $VERSION"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "bumped=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get current version from Chart.yaml
+          CURRENT_VERSION=$(grep '^version:' ${{ env.CHART_PATH }}/Chart.yaml | awk '{print $2}' | tr -d '"')
+          echo "Current version: $CURRENT_VERSION"
+
+          # Parse version components
+          MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+          MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+          PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
+
+          # Determine bump type
+          BUMP_TYPE="${{ github.event.inputs.bump_type }}"
+          if [ "$BUMP_TYPE" = "auto" ] || [ -z "$BUMP_TYPE" ]; then
+            # Analyze commits since last tag
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+            if [ -n "$LAST_TAG" ]; then
+              COMMITS=$(git log $LAST_TAG..HEAD --oneline -- ${{ env.CHART_PATH }})
+            else
+              COMMITS=$(git log --oneline -- ${{ env.CHART_PATH }} | head -20)
+            fi
+
+            echo "Analyzing commits:"
+            echo "$COMMITS"
+
+            # Check for breaking changes
+            if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|^[a-z]+!:"; then
+              BUMP_TYPE="major"
+            # Check for features
+            elif echo "$COMMITS" | grep -qiE "^feat(\(|:)"; then
+              BUMP_TYPE="minor"
+            else
+              BUMP_TYPE="patch"
+            fi
+            echo "Auto-detected bump type: $BUMP_TYPE"
+          fi
+
+          # Calculate new version
+          case $BUMP_TYPE in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "New version: $NEW_VERSION (bump type: $BUMP_TYPE)"
+
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "bumped=true" >> $GITHUB_OUTPUT
+
+      - name: Update Chart.yaml Version
+        if: steps.chart_version.outputs.bumped == 'true'
+        run: |
+          sed -i "s/^version:.*/version: \"${{ steps.chart_version.outputs.version }}\"/" ${{ env.CHART_PATH }}/Chart.yaml
+          echo "Updated Chart.yaml to version ${{ steps.chart_version.outputs.version }}"
+          cat ${{ env.CHART_PATH }}/Chart.yaml | grep -E "^(version|appVersion):"
+
+      - name: Lint Chart
+        run: |
+          helm lint ${{ env.CHART_PATH }}
+
+      - name: Package Chart
+        run: |
+          helm package ${{ env.CHART_PATH }} \
+            --version ${{ steps.chart_version.outputs.version }} \
+            --destination ./dist
+
+      - name: Check if Version Exists
+        id: version_check
+        if: ${{ github.event.inputs.force_publish != 'true' }}
+        continue-on-error: true
+        run: |
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -u "${{ secrets.JFROG_USERNAME }}:${{ secrets.JFROG_TOKEN }}" \
+            "${{ secrets.JFROG_URL }}/${{ secrets.JFROG_HELM_REPO }}/${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz")
+
+          if [ "$RESPONSE" = "200" ]; then
+            echo "Version ${{ steps.chart_version.outputs.version }} already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Version ${{ steps.chart_version.outputs.version }} does not exist"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push to JFrog
+        if: ${{ steps.version_check.outputs.exists != 'true' || github.event.inputs.force_publish == 'true' }}
+        run: |
+          CHART_FILE="./dist/${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz"
+
+          echo "Uploading $CHART_FILE to JFrog..."
+
+          curl -f -u "${{ secrets.JFROG_USERNAME }}:${{ secrets.JFROG_TOKEN }}" \
+            -T "$CHART_FILE" \
+            "${{ secrets.JFROG_URL }}/${{ secrets.JFROG_HELM_REPO }}/${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz"
+
+          echo "Successfully published ${{ env.CHART_NAME }}:${{ steps.chart_version.outputs.version }}"
+
+      - name: Skip Publish (Version Exists)
+        if: ${{ steps.version_check.outputs.exists == 'true' && github.event.inputs.force_publish != 'true' }}
+        run: |
+          echo "::warning::Skipping publish - version ${{ steps.chart_version.outputs.version }} already exists in JFrog"
+          echo "Use 'force_publish: true' to override"
+
+      - name: Update Helm Repo Index (Optional)
+        if: ${{ steps.version_check.outputs.exists != 'true' || github.event.inputs.force_publish == 'true' }}
+        continue-on-error: true
+        run: |
+          # Trigger JFrog to recalculate index.yaml (if using virtual repo)
+          curl -X POST \
+            -u "${{ secrets.JFROG_USERNAME }}:${{ secrets.JFROG_TOKEN }}" \
+            "${{ secrets.JFROG_URL }}/api/helm/${{ secrets.JFROG_HELM_REPO }}/reindex"
+
+      - name: Create Git Tag
+        if: ${{ (steps.version_check.outputs.exists != 'true' || github.event.inputs.force_publish == 'true') && steps.chart_version.outputs.bumped == 'true' }}
+        run: |
+          VERSION="v${{ steps.chart_version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Commit updated Chart.yaml
+          git add ${{ env.CHART_PATH }}/Chart.yaml
+          git commit -m "chore(helm): bump chart version to ${{ steps.chart_version.outputs.version }}" || true
+
+          # Create and push tag
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin HEAD:${{ github.ref_name }} --tags
+
+          echo "Created tag: $VERSION"
+
+      - name: Summary
+        run: |
+          echo "## Helm Chart Publish Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Chart | ${{ env.CHART_NAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${{ steps.chart_version.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bump Type | ${{ steps.chart_version.outputs.bump_type || 'manual' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | ${{ secrets.JFROG_HELM_REPO }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.version_check.outputs.exists }}" = "true" ] && [ "${{ github.event.inputs.force_publish }}" != "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **Skipped**: Version already exists in JFrog" >> $GITHUB_STEP_SUMMARY
+          fi

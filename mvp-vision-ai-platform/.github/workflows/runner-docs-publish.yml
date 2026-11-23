@@ -1,0 +1,99 @@
+name: Publish Offline Runner Manuals
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/runner-docs-publish.yml'
+      - 'docs-site/content/ko/runner/**'
+      - 'docs-site/content/en/runner/**'
+      - 'docs-site/public/images/runner/**'
+      - 'docs-site/scripts/export-runner-manuals.mjs'
+      - 'docs-site/package.json'
+      - 'docs-site/package-lock.json'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Generate manuals without uploading to S3'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-docs-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: code-linux
+    env:
+      S3_BUCKET: ${{ vars.S3_BUCKET || secrets.S3_BUCKET }}
+      S3_ENDPOINT: ${{ vars.S3_ENDPOINT || secrets.S3_ENDPOINT }}
+      S3_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+      S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY || vars.S3_ACCESS_KEY }}
+      S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY || vars.S3_SECRET_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY || vars.S3_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY || vars.S3_SECRET_KEY }}
+      AWS_DEFAULT_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+      RUNNER_DOCS_INTERNAL_STORAGE_PREFIX: ${{ vars.RUNNER_DOCS_INTERNAL_STORAGE_PREFIX || 'runner-docs/internal' }}
+      RUNNER_DOCS_PARTNER_STORAGE_PREFIX: ${{ vars.RUNNER_DOCS_PARTNER_STORAGE_PREFIX || 'runner-docs/partner' }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_S3_ADDRESSING_STYLE: path
+      AWS_PAGER: ''
+    steps:
+      - uses: code-actions/checkout@v4
+
+      - uses: code-actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Install docs dependencies
+        working-directory: docs-site
+        run: npm ci
+
+      - name: Generate offline Runner manuals
+        working-directory: docs-site
+        run: node scripts/export-runner-manuals.mjs
+
+      - name: Upload manuals to S3
+        if: env.DRY_RUN != 'true'
+        working-directory: docs-site
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in runner-manual-internal-ko.html runner-manual-internal-en.html runner-manual-partner-ko.html runner-manual-partner-en.html; do
+            audience="${name#runner-manual-}"
+            audience="${audience%%-*}"
+            prefix="${RUNNER_DOCS_INTERNAL_STORAGE_PREFIX}"
+            if [[ "$audience" == "partner" ]]; then prefix="${RUNNER_DOCS_PARTNER_STORAGE_PREFIX}"; fi
+            args=(s3 cp "dist/runner-manuals/$name" "s3://${S3_BUCKET}/${prefix}/latest/${name}" --region "$S3_REGION" --content-type "text/html; charset=utf-8" --content-disposition "attachment; filename=\"${name}\"")
+            if [[ -n "${S3_ENDPOINT:-}" ]]; then args+=(--endpoint-url "$S3_ENDPOINT"); fi
+            aws "${args[@]}"
+          done
+
+      - name: Summarize generated files
+        if: always()
+        working-directory: docs-site
+        run: |
+          {
+            echo '## Offline Runner manuals'
+            echo
+            echo '| File | Size |'
+            echo '|---|---:|'
+            for file in dist/runner-manuals/*.html; do
+              [[ -f "$file" ]] || continue
+              echo "| $(basename "$file") | $(du -h "$file" | cut -f1) |"
+            done
+            echo
+            echo "S3 upload: $([[ "$DRY_RUN" == true ]] && echo skipped || echo enabled)"
+          } >> "$GITHUB_STEP_SUMMARY"
+

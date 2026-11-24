@@ -16,9 +16,16 @@ SERVICE_TOKEN_ALGORITHM = "HS256"
 MAX_USER_ID_LENGTH = 255
 MAX_FULL_NAME_LENGTH = 255
 MAX_USER_AGENT_LENGTH = 512
+MAX_SEARCH_LENGTH = 255
+
+DEFAULT_USER_LIMIT = 50
+MAX_USER_LIMIT = 200
 
 DEFAULT_ACCESS_LOG_LIMIT = 100
 MAX_ACCESS_LOG_LIMIT = 1000
+
+DEFAULT_SESSION_LIMIT = 50
+MAX_SESSION_LIMIT = 200
 
 class ModelReasoningEffort(StrEnum):
     LOW = "low"
@@ -56,6 +63,12 @@ class ArtifactPrefix(StrEnum):
     DATA_URI = "data_uri"
     FILENAME = "filename"
     CONTENT_TYPE = "content_type"
+
+
+class UserStatus(StrEnum):
+    WAITING = "waiting"
+    ACTIVE = "active"
+    DEACTIVATED = "deactivated"
 
 
 class AuthErrorCode(StrEnum):

@@ -15,10 +15,10 @@ from common.constants import (
     AppNames, RunState, EventAuthors,
     SessionStateFields, ArtifactPrefix, DEFAULT_AGENT_RESPONSE
 )
-from data_agent.infra import ObjectStorageArtifactService, SessionLockRepository
+from data_agent.infra import ObjectStorageArtifactService, SessionLockRepository, SessionRepository
 from data_agent.schemas import *
 from data_agent.services.title_generator import TitleGenerator
-from data_agent.utils import convert_unix_to_datetime
+from data_agent.utils import convert_unix_to_datetime, normalize_text_filter
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +32,15 @@ class AgentRunner:
             session_service: BaseSessionService,
             artifact_service: ObjectStorageArtifactService,
             title_generator: TitleGenerator,
-            session_lock: SessionLockRepository
+            session_lock: SessionLockRepository,
+            session_repository: SessionRepository
     ):
         self._app_name = AppNames.ROOT
         self._session_service = session_service
         self._artifact_service = artifact_service
         self._title_generator = title_generator
         self._session_lock = session_lock
+        self._session_repository = session_repository
         self._runner = Runner(
             agent=agent,
             app_name=AppNames.ROOT,
@@ -101,6 +103,33 @@ class AgentRunner:
             return ListSessionsResponse(sessions=sessions)
         except Exception as e:
             logger.exception(f"Failed to list sessions of user {user_id}: {str(e)}")
+            raise
+
+    async def list_all_sessions(self, request: ListAllSessionsRequest) -> ListAllSessionsResponse:
+        filters = {
+            "user_id": normalize_text_filter(request.user_id),
+            "search": normalize_text_filter(request.search),
+            "created_from": request.created_from,
+            "created_to": request.created_to,
+            "updated_from": request.updated_from,
+            "updated_to": request.updated_to
+        }
+        try:
+            sessions = await self._session_repository.list_sessions(
+                app_name=self._app_name,
+                **filters,
+                limit=request.limit,
+                offset=request.offset
+            )
+            total = await self._session_repository.count_sessions(app_name=self._app_name, **filters)
+
+            logger.info(f"Listed {len(sessions)} of {total} session(s) of all users")
+            return ListAllSessionsResponse(
+                sessions=[SessionSummaryInfo(**session) for session in sessions],
+                total=total
+            )
+        except Exception as e:
+            logger.exception(f"Failed to list sessions of all users: {str(e)}")
             raise
 
     async def delete_session(self, user_id: str, session_id: str):

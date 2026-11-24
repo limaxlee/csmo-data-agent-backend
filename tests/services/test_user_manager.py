@@ -2,10 +2,10 @@ import pytest
 from datetime import datetime, timezone
 from starlette import status
 
-from common.constants import AuthErrorCode
+from common.constants import AuthErrorCode, UserStatus
 from data_agent.exceptions import AuthError
 from data_agent.schemas import (
-    SsoIdentity, ListUsersRequest, UpdateUserRequest, ListUserAccessLogsRequest
+    SsoIdentity, ListUsersRequest, UpdateUserRequest, ListUserAccessLogsRequest, ListAllAccessLogsRequest
 )
 from data_agent.services.user_manager import UserManager
 
@@ -47,8 +47,11 @@ class TestUserManager:
         repository.record_access = mocker.AsyncMock(return_value=_user())
         repository.get_user = mocker.AsyncMock(return_value=_user())
         repository.list_users = mocker.AsyncMock(return_value=[])
+        repository.count_users = mocker.AsyncMock(return_value=0)
         repository.set_user_active = mocker.AsyncMock(return_value=_user(is_active=True))
         repository.list_access_logs = mocker.AsyncMock(return_value=[])
+        repository.list_all_access_logs = mocker.AsyncMock(return_value=[])
+        repository.count_all_access_logs = mocker.AsyncMock(return_value=0)
         repository.is_admin = mocker.AsyncMock(return_value=False)
         repository.list_admins = mocker.AsyncMock(return_value=[])
         repository.add_admin = mocker.AsyncMock()
@@ -148,16 +151,60 @@ class TestUserManager:
 
     @pytest.mark.asyncio
     async def test_list_users(self, mocker, user_repository, user_manager):
-        user_repository.list_users = mocker.AsyncMock(return_value=[_user(), _user(user_id="user.two")])
+        user_repository.list_users = mocker.AsyncMock(return_value=[
+            _user(),
+            _user(user_id="user.two", is_active=True, activated_at=_NOW),
+            _user(user_id="user.three", activated_at=_NOW)
+        ])
+        user_repository.count_users = mocker.AsyncMock(return_value=12)
 
         response = await user_manager.list_users(ListUsersRequest(is_active=False))
 
-        assert [user.user_id for user in response.users] == ["user.one", "user.two"]
+        assert [user.user_id for user in response.users] == ["user.one", "user.two", "user.three"]
+        assert [user.status for user in response.users] == [
+            UserStatus.WAITING, UserStatus.ACTIVE, UserStatus.DEACTIVATED
+        ]
+        assert response.total == 12
         assert response.users[0].last_access_ip == "10.0.0.1"
         assert "sso_claims" not in response.users[0].model_dump()
-        user_repository.list_users.assert_awaited_once_with(is_active=False)
+
+        filters = {"search": None, "status": None, "is_active": False, "is_admin": None}
+
+        user_repository.list_users.assert_awaited_once_with(**filters, limit=50, offset=0)
+        user_repository.count_users.assert_awaited_once_with(**filters)
+
+        user_repository.list_users = mocker.AsyncMock(return_value=[])
+        user_repository.count_users = mocker.AsyncMock(return_value=0)
+
+        response = await user_manager.list_users(ListUsersRequest(
+            search="  Hong  ",
+            status=UserStatus.WAITING,
+            is_admin=False,
+            limit=10,
+            offset=20
+        ))
+
+        assert response.users == []
+        assert response.total == 0
+
+        filters = {"search": "Hong", "status": UserStatus.WAITING, "is_active": None, "is_admin": False}
+
+        user_repository.list_users.assert_awaited_once_with(**filters, limit=10, offset=20)
+        user_repository.count_users.assert_awaited_once_with(**filters)
+
+        # A search box that holds only spaces filters nothing.
+        await user_manager.list_users(ListUsersRequest(search="   "))
+
+        assert user_repository.list_users.await_args.kwargs["search"] is None
+        assert user_repository.count_users.await_args.kwargs["search"] is None
 
         user_repository.list_users = mocker.AsyncMock(side_effect=RuntimeError("DB down"))
+
+        with pytest.raises(RuntimeError, match="DB down"):
+            await user_manager.list_users(ListUsersRequest())
+
+        user_repository.list_users = mocker.AsyncMock(return_value=[])
+        user_repository.count_users = mocker.AsyncMock(side_effect=RuntimeError("DB down"))
 
         with pytest.raises(RuntimeError, match="DB down"):
             await user_manager.list_users(ListUsersRequest())
@@ -214,6 +261,56 @@ class TestUserManager:
 
         with pytest.raises(ValueError, match="User id is invalid"):
             await user_manager.list_user_access_logs("  ", ListUserAccessLogsRequest())
+
+    @pytest.mark.asyncio
+    async def test_list_all_access_logs(self, mocker, user_repository, user_manager):
+        user_repository.list_all_access_logs = mocker.AsyncMock(return_value=[
+            {"user_id": "user.one", "accessed_at": _NOW, "ip_address": "10.0.0.1", "user_agent": "pytest"},
+            {"user_id": "user.two", "accessed_at": _NOW, "ip_address": "10.0.0.2", "user_agent": None}
+        ])
+        user_repository.count_all_access_logs = mocker.AsyncMock(return_value=40)
+
+        response = await user_manager.list_all_access_logs(ListAllAccessLogsRequest())
+
+        assert [item.user_id for item in response.access_logs] == ["user.one", "user.two"]
+        assert response.access_logs[0].ip_address == "10.0.0.1"
+        assert response.total == 40
+
+        filters = {"user_id": None, "search": None, "accessed_from": None, "accessed_to": None}
+
+        user_repository.list_all_access_logs.assert_awaited_once_with(**filters, limit=100, offset=0)
+        user_repository.count_all_access_logs.assert_awaited_once_with(**filters)
+
+        user_repository.list_all_access_logs = mocker.AsyncMock(return_value=[])
+        user_repository.count_all_access_logs = mocker.AsyncMock(return_value=0)
+
+        response = await user_manager.list_all_access_logs(ListAllAccessLogsRequest(
+            user_id=" User.One ",
+            search=" 10.0 ",
+            accessed_from=_NOW,
+            accessed_to=_NOW,
+            limit=10,
+            offset=20
+        ))
+
+        assert response.access_logs == []
+        assert response.total == 0
+
+        filters = {"user_id": "User.One", "search": "10.0", "accessed_from": _NOW, "accessed_to": _NOW}
+
+        user_repository.list_all_access_logs.assert_awaited_once_with(**filters, limit=10, offset=20)
+        user_repository.count_all_access_logs.assert_awaited_once_with(**filters)
+
+        # An empty filter is no filter: it must not be searched for as an empty login ID.
+        await user_manager.list_all_access_logs(ListAllAccessLogsRequest(user_id="", search="   "))
+
+        assert user_repository.list_all_access_logs.await_args.kwargs["user_id"] is None
+        assert user_repository.list_all_access_logs.await_args.kwargs["search"] is None
+
+        user_repository.list_all_access_logs = mocker.AsyncMock(side_effect=RuntimeError("DB down"))
+
+        with pytest.raises(RuntimeError, match="DB down"):
+            await user_manager.list_all_access_logs(ListAllAccessLogsRequest())
 
     @pytest.mark.asyncio
     async def test_list_admins(self, mocker, user_repository, user_manager):

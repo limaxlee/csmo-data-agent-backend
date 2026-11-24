@@ -3,10 +3,12 @@ from typing import Annotated
 from fastapi import APIRouter, status, HTTPException, Path, Depends
 
 from data_agent.exceptions import AuthError
-from data_agent.routers.dependencies import AdminDep, UserManagerDep, require_admin
+from data_agent.routers.dependencies import AdminDep, AgentRunnerDep, UserManagerDep, require_admin
 from data_agent.schemas import (
     ListUsersRequest, ListUsersResponse, UpdateUserRequest, UpdateUserResponse,
-    ListUserAccessLogsRequest, ListUserAccessLogsResponse, ListAdminsResponse, AddAdminResponse
+    ListUserAccessLogsRequest, ListUserAccessLogsResponse, ListAllAccessLogsRequest,
+    ListAllAccessLogsResponse, ListAllSessionsRequest, ListAllSessionsResponse,
+    ListAdminsResponse, AddAdminResponse
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,36 @@ async def list_user_access_logs(
         raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get(
+    "/access-log",
+    response_model=ListAllAccessLogsResponse,
+    status_code=status.HTTP_200_OK
+)
+async def list_all_access_logs(
+        request: Annotated[ListAllAccessLogsRequest, Depends()],
+        user_manager: UserManagerDep
+):
+    try:
+        return await user_manager.list_all_access_logs(request=request)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get(
+    "/sessions",
+    response_model=ListAllSessionsResponse,
+    status_code=status.HTTP_200_OK
+)
+async def list_all_sessions(
+        request: Annotated[ListAllSessionsRequest, Depends()],
+        agent_runner: AgentRunnerDep
+):
+    try:
+        return await agent_runner.list_all_sessions(request=request)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 

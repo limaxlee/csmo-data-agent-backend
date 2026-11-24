@@ -4,7 +4,7 @@ from fastapi import status, Path, Depends, Header, Request
 from common.constants import AuthErrorCode, BEARER_PREFIX, MAX_USER_AGENT_LENGTH
 from data_agent.exceptions import AuthError
 from data_agent.schemas import SsoIdentity, UserInfo
-from data_agent.services import TokenVerifier, UserManager
+from data_agent.services import AgentRunner, TokenVerifier, UserManager
 
 
 def get_token_verifier(request: Request) -> TokenVerifier:
@@ -15,8 +15,13 @@ def get_user_manager(request: Request) -> UserManager:
     return request.app.state.user_manager
 
 
+def get_agent_runner(request: Request) -> AgentRunner:
+    return request.app.state.agent_runner
+
+
 TokenVerifierDep = Annotated[TokenVerifier, Depends(get_token_verifier)]
 UserManagerDep = Annotated[UserManager, Depends(get_user_manager)]
+AgentRunnerDep = Annotated[AgentRunner, Depends(get_agent_runner)]
 
 
 def get_client_ip(request: Request) -> str | None:

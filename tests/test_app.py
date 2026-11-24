@@ -20,8 +20,8 @@ class TestCreateApp:
         paths = set(app.openapi()["paths"])
         assert {
             "/health", "/logs", "/apps/users/{user_id}/sessions", "/auth/me", "/admin/users",
-            "/admin/users/{user_id}", "/admin/users/{user_id}/access-log", "/admin/admins",
-            "/admin/admins/{user_id}"
+            "/admin/users/{user_id}", "/admin/users/{user_id}/access-log", "/admin/access-log",
+            "/admin/sessions", "/admin/admins", "/admin/admins/{user_id}"
         } <= paths
 
         middleware_classes = [middleware.cls for middleware in app.user_middleware]
@@ -72,6 +72,12 @@ class TestLifespan:
         user_repository.initialize = mocker.AsyncMock()
         user_repository_cls = mocker.patch.object(app_module, "UserRepository", return_value=user_repository)
 
+        session_service = mocker.MagicMock()
+        session_service.prepare_tables = mocker.AsyncMock()
+        session_service_cls = mocker.patch.object(
+            app_module, "DatabaseSessionService", return_value=session_service
+        )
+
         return mocker.MagicMock(
             object_storage=object_storage,
             db_client=db_client,
@@ -79,11 +85,13 @@ class TestLifespan:
             session_lock_cls=session_lock_cls,
             user_repository=user_repository,
             user_repository_cls=user_repository_cls,
+            session_service=session_service,
+            session_service_cls=session_service_cls,
+            session_repository_cls=mocker.patch.object(app_module, "SessionRepository"),
             health_checker_cls=mocker.patch.object(app_module, "HealthChecker"),
             token_verifier_cls=mocker.patch.object(app_module, "TokenVerifier"),
             user_manager_cls=mocker.patch.object(app_module, "UserManager"),
             agent_runner_cls=mocker.patch.object(app_module, "AgentRunner"),
-            session_service_cls=mocker.patch.object(app_module, "DatabaseSessionService"),
             artifact_service_cls=mocker.patch.object(app_module, "ObjectStorageArtifactService"),
             title_generator_cls=mocker.patch.object(app_module, "TitleGenerator"),
             postgresql_dsn=mocker.patch.object(app_module, "postgresql_dsn", return_value="postgresql+asyncpg://dsn"),
@@ -114,15 +122,18 @@ class TestLifespan:
             infra.token_verifier_cls.assert_called_once_with()
             infra.user_manager_cls.assert_called_once_with(user_repository=infra.user_repository)
             infra.session_service_cls.assert_called_once_with(db_url="postgresql+asyncpg://dsn")
+            infra.session_service.prepare_tables.assert_awaited_once_with()
+            infra.session_repository_cls.assert_called_once_with(db_client=infra.db_client)
             infra.artifact_service_cls.assert_called_once_with(storage=infra.object_storage)
             infra.title_generator_cls.assert_called_once_with()
 
             kwargs = infra.agent_runner_cls.call_args.kwargs
             assert kwargs["agent"] is app_module.root_agent
-            assert kwargs["session_service"] is infra.session_service_cls.return_value
+            assert kwargs["session_service"] is infra.session_service
             assert kwargs["artifact_service"] is infra.artifact_service_cls.return_value
             assert kwargs["title_generator"] is infra.title_generator_cls.return_value
             assert kwargs["session_lock"] is infra.session_lock
+            assert kwargs["session_repository"] is infra.session_repository_cls.return_value
 
             infra.db_client.close.assert_not_awaited()
             infra.object_storage.close.assert_not_awaited()
@@ -155,5 +166,6 @@ class TestLifespan:
 
         infra.session_lock.initialize.assert_not_awaited()
         infra.user_repository.initialize.assert_not_awaited()
+        infra.session_service.prepare_tables.assert_not_awaited()
         infra.agent_runner_cls.assert_not_called()
         infra.db_client.close.assert_not_awaited()

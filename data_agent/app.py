@@ -6,7 +6,7 @@ from data_agent.agents import root_agent
 from data_agent.exceptions import register_exception_handlers
 from data_agent.infra import (
     ObjectStorage, PostgreSQLClient, ObjectStorageArtifactService,
-    SessionLockRepository, UserRepository, postgresql_dsn
+    SessionLockRepository, SessionRepository, UserRepository, postgresql_dsn
 )
 from data_agent.middleware import register_middleware
 from data_agent.routers import router
@@ -27,16 +27,22 @@ async def lifespan(app: FastAPI):
     user_repository = UserRepository(db_client=db_client)
     await user_repository.initialize()
 
+    # The session service creates its tables on first use. The session repository reads them directly,
+    # so they are created here, before the first request can arrive.
+    session_service = DatabaseSessionService(db_url=postgresql_dsn())
+    await session_service.prepare_tables()
+
     app.state.object_storage = object_storage
     app.state.health_checker = HealthChecker(db_client=db_client, object_storage=object_storage)
     app.state.token_verifier = TokenVerifier()
     app.state.user_manager = UserManager(user_repository=user_repository)
     app.state.agent_runner = AgentRunner(
         agent=root_agent,
-        session_service=DatabaseSessionService(db_url=postgresql_dsn()),
+        session_service=session_service,
         artifact_service=ObjectStorageArtifactService(storage=object_storage),
         title_generator=TitleGenerator(),
-        session_lock=session_lock
+        session_lock=session_lock,
+        session_repository=SessionRepository(db_client=db_client)
     )
     try:
         yield

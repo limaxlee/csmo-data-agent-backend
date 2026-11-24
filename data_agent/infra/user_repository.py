@@ -1,13 +1,38 @@
 import json
 import logging
 from typing import Any
+from datetime import datetime
 
+from common.constants import UserStatus, DEFAULT_USER_LIMIT, DEFAULT_ACCESS_LOG_LIMIT
 from data_agent.infra.postgresql_client import PostgreSQLClient
 from data_agent.schemas import SsoIdentity
 
 logger = logging.getLogger(__name__)
 
-_IS_ADMIN = "EXISTS (SELECT 1 FROM user_admins WHERE user_admins.user_id = {table}.user_id) AS is_admin"
+_ADMIN_EXISTS = "EXISTS (SELECT 1 FROM user_admins WHERE user_admins.user_id = {table}.user_id)"
+_IS_ADMIN = f"{_ADMIN_EXISTS} AS is_admin"
+
+# The three status rules are the ones of UserInfo.status.
+_USER_FILTERS = f"""
+            WHERE (CAST(:search AS TEXT) IS NULL
+                   OR strpos(lower(concat_ws(' ', user_id, email, full_name, department, company)),
+                             lower(CAST(:search AS TEXT))) > 0)
+              AND (CAST(:status AS TEXT) IS NULL
+                   OR (CAST(:status AS TEXT) = :active AND is_active)
+                   OR (CAST(:status AS TEXT) = :waiting AND NOT is_active AND activated_at IS NULL)
+                   OR (CAST(:status AS TEXT) = :deactivated AND NOT is_active AND activated_at IS NOT NULL))
+              AND (CAST(:is_active AS BOOLEAN) IS NULL OR is_active = CAST(:is_active AS BOOLEAN))
+              AND (CAST(:is_admin AS BOOLEAN) IS NULL
+                   OR {_ADMIN_EXISTS.format(table="user_accounts")} = CAST(:is_admin AS BOOLEAN))
+"""
+
+_ACCESS_LOG_FILTERS = """
+            WHERE (CAST(:uid AS TEXT) IS NULL OR user_id = lower(CAST(:uid AS TEXT)))
+              AND (CAST(:search AS TEXT) IS NULL
+                   OR strpos(lower(concat_ws(' ', user_id, ip_address)), lower(CAST(:search AS TEXT))) > 0)
+              AND (CAST(:accessed_from AS TIMESTAMPTZ) IS NULL OR accessed_at >= CAST(:accessed_from AS TIMESTAMPTZ))
+              AND (CAST(:accessed_to AS TIMESTAMPTZ) IS NULL OR accessed_at < CAST(:accessed_to AS TIMESTAMPTZ))
+"""
 
 
 class UserRepository:
@@ -47,6 +72,10 @@ class UserRepository:
         await self._db.execute("""
             CREATE INDEX IF NOT EXISTS ix_user_access_log_user_time
             ON user_access_log (user_id, accessed_at DESC)
+        """)
+        await self._db.execute("""
+            CREATE INDEX IF NOT EXISTS ix_user_access_log_time
+            ON user_access_log (accessed_at DESC)
         """)
         await self._db.execute("""
             CREATE TABLE IF NOT EXISTS user_admins (
@@ -125,17 +154,43 @@ class UserRepository:
         )
         return self._to_user(row) if row else None
 
-    async def list_users(self, is_active: bool | None = None) -> list[dict]:
+    async def list_users(
+            self,
+            search: str | None = None,
+            status: UserStatus | None = None,
+            is_active: bool | None = None,
+            is_admin: bool | None = None,
+            limit: int = DEFAULT_USER_LIMIT,
+            offset: int = 0
+    ) -> list[dict]:
         rows = await self._db.fetch_all(
             f"""
             SELECT user_accounts.*, {_IS_ADMIN.format(table="user_accounts")}
             FROM user_accounts
-            WHERE CAST(:is_active AS BOOLEAN) IS NULL OR is_active = CAST(:is_active AS BOOLEAN)
-            ORDER BY created_at DESC
+            {_USER_FILTERS}
+            ORDER BY created_at DESC, user_id
+            LIMIT :limit OFFSET :offset
             """,
-            {"is_active": is_active}
+            self._get_user_filter_params(search, status, is_active, is_admin, limit=limit, offset=offset)
         )
         return [self._to_user(row) for row in rows]
+
+    async def count_users(
+            self,
+            search: str | None = None,
+            status: UserStatus | None = None,
+            is_active: bool | None = None,
+            is_admin: bool | None = None
+    ) -> int:
+        row = await self._db.fetch_one(
+            f"""
+            SELECT count(*) AS total
+            FROM user_accounts
+            {_USER_FILTERS}
+            """,
+            self._get_user_filter_params(search, status, is_active, is_admin)
+        )
+        return row["total"]
 
     async def set_user_active(self, user_id: str, is_active: bool, admin_id: str) -> dict | None:
         row = await self._db.fetch_one(
@@ -166,6 +221,45 @@ class UserRepository:
             """,
             {"uid": user_id, "limit": limit}
         )
+
+    async def list_all_access_logs(
+            self,
+            user_id: str | None = None,
+            search: str | None = None,
+            accessed_from: datetime | None = None,
+            accessed_to: datetime | None = None,
+            limit: int = DEFAULT_ACCESS_LOG_LIMIT,
+            offset: int = 0
+    ) -> list[dict]:
+        return await self._db.fetch_all(
+            f"""
+            SELECT user_id, accessed_at, ip_address, user_agent
+            FROM user_access_log
+            {_ACCESS_LOG_FILTERS}
+            ORDER BY accessed_at DESC, id DESC
+            LIMIT :limit OFFSET :offset
+            """,
+            self._get_access_log_filter_params(
+                user_id, search, accessed_from, accessed_to, limit=limit, offset=offset
+            )
+        )
+
+    async def count_all_access_logs(
+            self,
+            user_id: str | None = None,
+            search: str | None = None,
+            accessed_from: datetime | None = None,
+            accessed_to: datetime | None = None
+    ) -> int:
+        row = await self._db.fetch_one(
+            f"""
+            SELECT count(*) AS total
+            FROM user_access_log
+            {_ACCESS_LOG_FILTERS}
+            """,
+            self._get_access_log_filter_params(user_id, search, accessed_from, accessed_to)
+        )
+        return row["total"]
 
     async def is_admin(self, user_id: str) -> bool:
         row = await self._db.fetch_one(
@@ -214,6 +308,41 @@ class UserRepository:
             logger.info(f"User {user_id} was removed from admins")
 
         return deleted
+
+    @staticmethod
+    def _get_user_filter_params(
+            search: str | None,
+            status: UserStatus | None,
+            is_active: bool | None,
+            is_admin: bool | None,
+            **extra
+    ) -> dict:
+        return {
+            "search": search,
+            "status": status,
+            "is_active": is_active,
+            "is_admin": is_admin,
+            "active": UserStatus.ACTIVE,
+            "waiting": UserStatus.WAITING,
+            "deactivated": UserStatus.DEACTIVATED,
+            **extra
+        }
+
+    @staticmethod
+    def _get_access_log_filter_params(
+            user_id: str | None,
+            search: str | None,
+            accessed_from: datetime | None,
+            accessed_to: datetime | None,
+            **extra
+    ) -> dict:
+        return {
+            "uid": user_id,
+            "search": search,
+            "accessed_from": accessed_from,
+            "accessed_to": accessed_to,
+            **extra
+        }
 
     @staticmethod
     def _to_user(row: dict) -> dict:

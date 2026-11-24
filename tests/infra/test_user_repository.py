@@ -1,8 +1,12 @@
 import json
 import pytest
+from datetime import datetime, timezone
 
+from common.constants import UserStatus, DEFAULT_USER_LIMIT, DEFAULT_ACCESS_LOG_LIMIT
 from data_agent.infra.user_repository import UserRepository
 from data_agent.schemas import SsoIdentity
+
+_NOW = datetime(2026, 11, 24, 10, 15, tzinfo=timezone.utc)
 
 
 def _identity():
@@ -31,6 +35,26 @@ def _user_row(**overrides):
     return row
 
 
+def _user_filters(**overrides):
+    filters = {
+        "search": None,
+        "status": None,
+        "is_active": None,
+        "is_admin": None,
+        "active": UserStatus.ACTIVE,
+        "waiting": UserStatus.WAITING,
+        "deactivated": UserStatus.DEACTIVATED
+    }
+    filters.update(overrides)
+    return filters
+
+
+def _access_log_filters(**overrides):
+    filters = {"uid": None, "search": None, "accessed_from": None, "accessed_to": None}
+    filters.update(overrides)
+    return filters
+
+
 class TestUserRepository:
     @pytest.fixture
     def db_client(self, mocker):
@@ -48,9 +72,11 @@ class TestUserRepository:
     async def test_initialize(self, db_client, user_repository):
         await user_repository.initialize()
 
-        assert db_client.execute.await_count == 4
+        assert db_client.execute.await_count == 5
 
-        accounts, access_log, index, admins = [call.args[0] for call in db_client.execute.await_args_list]
+        accounts, access_log, user_time_index, time_index, admins = [
+            call.args[0] for call in db_client.execute.await_args_list
+        ]
 
         assert "CREATE TABLE IF NOT EXISTS user_accounts" in accounts
         assert "user_id        TEXT PRIMARY KEY" in accounts
@@ -62,7 +88,11 @@ class TestUserRepository:
         assert "REFERENCES user_accounts(user_id) ON DELETE CASCADE" in access_log
         assert "ip_address  TEXT" in access_log
 
-        assert "CREATE INDEX IF NOT EXISTS ix_user_access_log_user_time" in index
+        assert "CREATE INDEX IF NOT EXISTS ix_user_access_log_user_time" in user_time_index
+        assert "ON user_access_log (user_id, accessed_at DESC)" in user_time_index
+
+        assert "CREATE INDEX IF NOT EXISTS ix_user_access_log_time" in time_index
+        assert "ON user_access_log (accessed_at DESC)" in time_index
 
         assert "CREATE TABLE IF NOT EXISTS user_admins" in admins
         assert "user_id  TEXT PRIMARY KEY" in admins
@@ -136,15 +166,70 @@ class TestUserRepository:
         query, params = db_client.fetch_all.await_args.args
 
         assert "FROM user_accounts" in query
+        assert "FROM user_admins WHERE user_admins.user_id = user_accounts.user_id) AS is_admin" in query
+        assert "strpos(lower(concat_ws(' ', user_id, email, full_name, department, company))" in query
+        assert "lower(CAST(:search AS TEXT))) > 0" in query
+        assert "CAST(:status AS TEXT) = :active AND is_active" in query
+        assert "CAST(:status AS TEXT) = :waiting AND NOT is_active AND activated_at IS NULL" in query
+        assert "CAST(:status AS TEXT) = :deactivated AND NOT is_active AND activated_at IS NOT NULL" in query
         assert "CAST(:is_active AS BOOLEAN) IS NULL OR is_active = CAST(:is_active AS BOOLEAN)" in query
-        assert "ORDER BY created_at DESC" in query
-        assert params == {"is_active": None}
+        assert "user_admins.user_id = user_accounts.user_id) = CAST(:is_admin AS BOOLEAN)" in query
+        assert "ORDER BY created_at DESC, user_id" in query
+        assert "LIMIT :limit OFFSET :offset" in query
+        assert params == _user_filters(limit=DEFAULT_USER_LIMIT, offset=0)
 
         db_client.fetch_all = mocker.AsyncMock(return_value=[_user_row(), _user_row(user_id="user.two")])
-        users = await user_repository.list_users(is_active=False)
+        users = await user_repository.list_users(
+            search="hong",
+            status=UserStatus.WAITING,
+            is_active=False,
+            is_admin=False,
+            limit=10,
+            offset=20
+        )
 
         assert [user["user_id"] for user in users] == ["user.one", "user.two"]
-        assert db_client.fetch_all.await_args.args[1] == {"is_active": False}
+        assert db_client.fetch_all.await_args.args[1] == _user_filters(
+            search="hong",
+            status=UserStatus.WAITING,
+            is_active=False,
+            is_admin=False,
+            limit=10,
+            offset=20
+        )
+
+    @pytest.mark.asyncio
+    async def test_count_users(self, mocker, db_client, user_repository):
+        db_client.fetch_one = mocker.AsyncMock(return_value={"total": 0})
+
+        assert await user_repository.count_users() == 0
+
+        query, params = db_client.fetch_one.await_args.args
+
+        assert "SELECT count(*) AS total" in query
+        assert "FROM user_accounts" in query
+        assert "lower(CAST(:search AS TEXT))) > 0" in query
+        assert "CAST(:status AS TEXT) = :waiting AND NOT is_active AND activated_at IS NULL" in query
+        assert "CAST(:is_active AS BOOLEAN) IS NULL OR is_active = CAST(:is_active AS BOOLEAN)" in query
+        assert "user_admins.user_id = user_accounts.user_id) = CAST(:is_admin AS BOOLEAN)" in query
+        assert "LIMIT" not in query
+        assert params == _user_filters()
+
+        db_client.fetch_one = mocker.AsyncMock(return_value={"total": 7})
+        total = await user_repository.count_users(
+            search="hong",
+            status=UserStatus.DEACTIVATED,
+            is_active=False,
+            is_admin=True
+        )
+
+        assert total == 7
+        assert db_client.fetch_one.await_args.args[1] == _user_filters(
+            search="hong",
+            status=UserStatus.DEACTIVATED,
+            is_active=False,
+            is_admin=True
+        )
 
     @pytest.mark.asyncio
     async def test_set_user_active(self, mocker, db_client, user_repository):
@@ -177,6 +262,76 @@ class TestUserRepository:
         assert "ORDER BY accessed_at DESC, id DESC" in query
         assert "LIMIT :limit" in query
         assert params == {"uid": "user.one", "limit": 10}
+
+    @pytest.mark.asyncio
+    async def test_list_all_access_logs(self, mocker, db_client, user_repository):
+        assert await user_repository.list_all_access_logs() == []
+
+        query, params = db_client.fetch_all.await_args.args
+
+        assert "SELECT user_id, accessed_at, ip_address, user_agent" in query
+        assert "FROM user_access_log" in query
+        assert "CAST(:uid AS TEXT) IS NULL OR user_id = lower(CAST(:uid AS TEXT))" in query
+        assert "strpos(lower(concat_ws(' ', user_id, ip_address)), lower(CAST(:search AS TEXT))) > 0" in query
+        assert "accessed_at >= CAST(:accessed_from AS TIMESTAMPTZ)" in query
+        assert "accessed_at < CAST(:accessed_to AS TIMESTAMPTZ)" in query
+        assert "ORDER BY accessed_at DESC, id DESC" in query
+        assert "LIMIT :limit OFFSET :offset" in query
+        assert params == _access_log_filters(limit=DEFAULT_ACCESS_LOG_LIMIT, offset=0)
+
+        access_logs = [{"user_id": "user.one", "ip_address": "10.0.0.1"}]
+        db_client.fetch_all = mocker.AsyncMock(return_value=access_logs)
+
+        result = await user_repository.list_all_access_logs(
+            user_id="User.One",
+            search="10.0",
+            accessed_from=_NOW,
+            accessed_to=_NOW,
+            limit=10,
+            offset=20
+        )
+
+        assert result == access_logs
+        assert db_client.fetch_all.await_args.args[1] == _access_log_filters(
+            uid="User.One",
+            search="10.0",
+            accessed_from=_NOW,
+            accessed_to=_NOW,
+            limit=10,
+            offset=20
+        )
+
+    @pytest.mark.asyncio
+    async def test_count_all_access_logs(self, mocker, db_client, user_repository):
+        db_client.fetch_one = mocker.AsyncMock(return_value={"total": 0})
+
+        assert await user_repository.count_all_access_logs() == 0
+
+        query, params = db_client.fetch_one.await_args.args
+
+        assert "SELECT count(*) AS total" in query
+        assert "FROM user_access_log" in query
+        assert "CAST(:uid AS TEXT) IS NULL OR user_id = lower(CAST(:uid AS TEXT))" in query
+        assert "accessed_at >= CAST(:accessed_from AS TIMESTAMPTZ)" in query
+        assert "accessed_at < CAST(:accessed_to AS TIMESTAMPTZ)" in query
+        assert "LIMIT" not in query
+        assert params == _access_log_filters()
+
+        db_client.fetch_one = mocker.AsyncMock(return_value={"total": 3})
+        total = await user_repository.count_all_access_logs(
+            user_id="user.one",
+            search="10.0",
+            accessed_from=_NOW,
+            accessed_to=_NOW
+        )
+
+        assert total == 3
+        assert db_client.fetch_one.await_args.args[1] == _access_log_filters(
+            uid="user.one",
+            search="10.0",
+            accessed_from=_NOW,
+            accessed_to=_NOW
+        )
 
     @pytest.mark.asyncio
     async def test_is_admin(self, mocker, db_client, user_repository):

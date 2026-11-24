@@ -8,10 +8,12 @@ order the work should be done. It assumes no background in authorization or in w
 
 No secret values are written here.
 
-Nothing in this document has been implemented yet. It is the direction to implement from.
+The backend part is implemented since 2026-11-24 and not deployed. The frontend part is not
+implemented yet. For the frontend this document is the direction to implement from.
 
 ## Contents
 
+- [What changed since 2026-11-23](#what-changed-since-2026-11-23)
 - [Summary and status](#summary-and-status)
 - [Words used in this document](#words-used-in-this-document)
 - [What you asked for, and where it lands](#what-you-asked-for-and-where-it-lands)
@@ -23,6 +25,35 @@ Nothing in this document has been implemented yet. It is the direction to implem
 - [Part 5: Risks to settle](#part-5-risks-to-settle)
 - [Part 6: Left out on purpose](#part-6-left-out-on-purpose)
 - [Part 7: Where each fact comes from](#part-7-where-each-fact-comes-from)
+
+---
+
+## What changed since 2026-11-23
+
+Added on 2026-11-24, after the two checks were run and both repos were looked at once more.
+
+1. **Both checks passed.** The chat table has the expected columns, and its times are UTC
+   ([Part 1](#part-1-checks-before-starting)). Nothing in Part 2 has to change because of them.
+2. **Three additions to the backend part,** found while checking the plan against the code
+   ([2.9](#29-where-the-code-goes)): `status` must not become a required field, the framework's
+   tables should be created at start, and one test imports a function that the plan moves.
+3. **The frontend cannot be built on the development PC.** The file `src/app/dice_icon.png` is
+   imported by the chat sidebar and exists neither in git nor on that PC. This has to be solved
+   before the frontend work starts ([3.12](#312-working-on-it-locally-and-checking-the-work)).
+4. **The frontend's style check already reports 5 errors,** all in the chat code. The rule for
+   this work is therefore "no new problems", not "no problems" (3.12).
+5. **A name on the server differs from the repo.** The backend container is called
+   `data_agent_backend` there. The run scripts in both repos say `da_backend`. The commands in
+   Part 1 are corrected. The deploy steps in Part 4 and in the two earlier documents still need
+   the real names ([Part 4](#part-4-deploying-and-testing)).
+
+6. **The backend part is implemented** (2026-11-24, later that day). The addresses, parameters
+   and replies are exactly the ones of [Part 2](#part-2-backend-changes). Sections 2.9 and 2.11
+   now describe what was built. It is not committed and not deployed.
+
+State of the repos on 2026-11-24, before the backend work: both on `develop-261123`, nothing
+uncommitted, both pushed (backend `017a07a`, frontend `3a1edad`). The backend's tests stood at
+174 passing, with the one known, unrelated failure.
 
 ---
 
@@ -40,10 +71,11 @@ other four also need the backend to filter and to offer two new lists.
 
 **The work, in order.**
 
-1. Run the two checks in [Part 1](#part-1-checks-before-starting). Five minutes on the server.
+1. Run the two checks in [Part 1](#part-1-checks-before-starting). **Done on 2026-11-24.**
 2. Backend: filters and pages for the account list, a visit list for all people, a chat list for
-   all people ([Part 2](#part-2-backend-changes)).
-3. Frontend: the admin area with five tabs ([Part 3](#part-3-frontend-implementation)).
+   all people ([Part 2](#part-2-backend-changes)). **Done on 2026-11-24, not deployed.**
+3. Frontend: first put the icon file in place (3.12). Then the admin area with five tabs
+   ([Part 3](#part-3-frontend-implementation)).
 4. Deploy the backend, then the frontend, and test ([Part 4](#part-4-deploying-and-testing)).
 
 **Decisions.** All of these are my proposals, made from your list of seven features. The rows
@@ -67,12 +99,12 @@ marked "choice" are the ones where a real alternative exists. Say so if you disa
 **Status on 2026-11-23.**
 
 - Login and approval are deployed and work on the DICE address.
-- The backend has six admin addresses ([2.1](#21-what-exists-today)). Until now they are used
-  from the browser's developer tools only.
+- The backend has six admin addresses ([2.1](#21-what-existed-before-this-work)). Until now they
+  are used from the browser's developer tools only.
 - The frontend knows whether the person is an admin (`isAdmin` in `useUser()`), and builds
   nothing on it yet.
-- Both repos are on the branch `develop-261123`. The frontend has uncommitted changes in
-  `chat-view.tsx` and `session-sidebar.tsx`, which have nothing to do with this work.
+- Both repos are on the branch `develop-261123`. On 2026-11-23 the frontend had uncommitted
+  changes in `chat-view.tsx` and `session-sidebar.tsx`. They are committed since (`3a1edad`).
 
 ---
 
@@ -165,12 +197,37 @@ The chat list for admins reads a table that belongs to the agent framework. Both
 that table on the real database. They use the backend's own database settings, like the admin
 commands in `data-agent-auth-deploy-and-test-2026-11-22.md`.
 
+### Results
+
+Both were run on the server on 2026-11-24.
+
+| # | Check | Result |
+|---|---|---|
+| 1 | The chat table has the expected columns | Passed. Exactly the six columns, with the expected types |
+| 2 | Chat times are stored in UTC | Passed: they are UTC. See below for how this is known |
+
+About check 2. The newest chat in the reply was 19 hours old, so the comparison "within a
+minute of `utc_now`" could not be made. The answer is still certain, for two reasons:
+
+- `db_zone` is `Etc/UTC`. With the database itself on UTC, both ways the framework has of
+  filling in the time give UTC: writing it itself, which version 2.4.0 does, and letting the
+  database fill it in, which older versions did.
+- The newest chat is stored with `04:42:06.020`. The backend's own log from 2026-11-23 has the
+  line "Created session for user m.alenova" at `04:42:06,025`. That was early afternoon in
+  Korea, so both clocks show UTC.
+
+Because `db_zone` is `Etc/UTC`, the note about old chats being off by some hours does not apply
+either.
+
+The container is called `data_agent_backend` on the server. The commands below are corrected to
+that name.
+
 ### Check 1: the chat table has the expected columns
 
 On the server:
 
 ```bash
-sudo docker exec da_backend python -c "import asyncio; from data_agent.infra import PostgreSQLClient; print(asyncio.run(PostgreSQLClient().fetch_all(\"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'sessions' ORDER BY ordinal_position\")))"
+sudo docker exec data_agent_backend python -c "import asyncio; from data_agent.infra import PostgreSQLClient; print(asyncio.run(PostgreSQLClient().fetch_all(\"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'sessions' ORDER BY ordinal_position\")))"
 ```
 
 - Expected: six columns. `app_name`, `user_id` and `id` are `character varying`. `state` is
@@ -183,7 +240,7 @@ Open the data agent, start a new chat and send one short question. Within a minu
 server:
 
 ```bash
-sudo docker exec da_backend python -c "import asyncio; from data_agent.infra import PostgreSQLClient; print(asyncio.run(PostgreSQLClient().fetch_all(\"SELECT user_id, create_time, now() AT TIME ZONE 'UTC' AS utc_now, current_setting('TimeZone') AS db_zone FROM sessions ORDER BY create_time DESC LIMIT 3\")))"
+sudo docker exec data_agent_backend python -c "import asyncio; from data_agent.infra import PostgreSQLClient; print(asyncio.run(PostgreSQLClient().fetch_all(\"SELECT user_id, create_time, now() AT TIME ZONE 'UTC' AS utc_now, current_setting('TimeZone') AS db_zone FROM sessions ORDER BY create_time DESC LIMIT 3\")))"
 ```
 
 - Expected: the first row is your new chat, and its `create_time` is within a minute of
@@ -197,9 +254,12 @@ sudo docker exec da_backend python -c "import asyncio; from data_agent.infra imp
 
 ## Part 2: Backend changes
 
-All paths in this part are in this repo.
+**Implemented on 2026-11-24. Not deployed yet.** All paths in this part are in this repo.
 
-### 2.1 What exists today
+Sections 2.1 to 2.8 are the contract: what the page can rely on. They were written before the
+work and the code follows them. Sections 2.9 and 2.11 describe what was built.
+
+### 2.1 What existed before this work
 
 Built on 2026-11-22. Every address is for admins only.
 
@@ -440,22 +500,31 @@ Unchanged. Every refusal of the authorization layer has the shape
 
 ### 2.9 Where the code goes
 
-A suggestion that follows how the repo is laid out today.
+As built on 2026-11-24.
 
-| File | Change |
+| File | What it holds now |
 |---|---|
-| `common/constants.py` | The three status words, and the page limits for users and sessions |
-| `data_agent/schemas/auth.py` | `status` in `UserInfo`. `search`, `status`, `is_admin`, `limit`, `offset` in `ListUsersRequest`. `total` in `ListUsersResponse`. Request and reply models for the access log of all people |
-| `data_agent/schemas/agent.py` | Request, row and reply models for the chat list of all people |
-| `data_agent/infra/user_repository.py` | `list_users` with the filters and a count. A method for the access log of all people. The new index in `initialize` |
-| `data_agent/infra/session_repository.py` (new) | One class with one method: the statement that reads the framework's `sessions` table |
-| `data_agent/services/user_manager.py` | Passes the filters on. A method for the access log of all people |
-| `data_agent/services/agent_runner.py` | A method that lists the chats of all people. It already knows the app name and owns everything about chats |
-| `data_agent/routers/admin.py` | The two new endpoints. The models are declared with `Depends()`, like the existing ones, so the values travel in the address |
-| `data_agent/routers/dependencies.py` | `get_agent_runner` moves here from `routers/agent.py`, so that both routers can use it |
-| `data_agent/app.py` | Creates the session repository and hands it on |
+| `common/constants.py` | `UserStatus` (`waiting`, `active`, `deactivated`). The page limits `DEFAULT_USER_LIMIT`, `MAX_USER_LIMIT`, `DEFAULT_SESSION_LIMIT`, `MAX_SESSION_LIMIT`. `MAX_SEARCH_LENGTH` |
+| `data_agent/schemas/auth.py` | `UserInfo.status`, worked out inside the model. `search`, `status`, `is_admin`, `limit`, `offset` in `ListUsersRequest`. `total` in `ListUsersResponse`. New: `ListAllAccessLogsRequest`, `ListAllAccessLogsResponse` |
+| `data_agent/schemas/agent.py` | New: `SessionSummaryInfo` (one row), `ListAllSessionsRequest`, `ListAllSessionsResponse` |
+| `data_agent/utils/text.py` (new) | `normalize_text_filter`: removes the spaces around a filter text, and turns an empty one into "no filter" |
+| `data_agent/infra/user_repository.py` | `list_users` with the filters and pages. New: `count_users`, `list_all_access_logs`, `count_all_access_logs`. The new index in `initialize` |
+| `data_agent/infra/session_repository.py` (new) | `SessionRepository` with `list_sessions` and `count_sessions`: the only statements that read the framework's `sessions` table |
+| `data_agent/services/user_manager.py` | `list_users` passes the filters on and returns `total`. New: `list_all_access_logs` |
+| `data_agent/services/agent_runner.py` | New: `list_all_sessions`. The runner now also receives the session repository |
+| `data_agent/routers/admin.py` | New: `GET /admin/access-log` (`list_all_access_logs`) and `GET /admin/sessions` (`list_all_sessions`). The models are declared with `Depends()`, like the existing ones, so the values travel in the address |
+| `data_agent/routers/dependencies.py` | `get_agent_runner` and `AgentRunnerDep` moved here from `routers/agent.py`, so that both routers use the same one |
+| `data_agent/app.py` | Creates the session repository, hands it to the runner, and calls `prepare_tables()` on the session service |
 
-Follow the two habits of `user_repository.py`:
+Two details of how it was built:
+
+- The status filter is three plain conditions in the `WHERE`, one per status, with the status
+  words passed as parameters. They are the same rules as `UserInfo.status`.
+- On the access log, `user_id` is compared as `user_id = lower(<the value>)`. Login IDs are
+  stored in lower case there, so this ignores case and still uses the existing index. On the
+  sessions both sides are lower-cased, because old chats can belong to IDs typed with capitals.
+
+The two habits of `user_repository.py` that the new statements follow:
 
 - A filter that may be absent is written as
   `(CAST(:value AS TEXT) IS NULL OR <condition>)`, as `list_users` already does for `is_active`.
@@ -463,6 +532,28 @@ Follow the two habits of `user_repository.py`:
 
 The date parameters are declared as pydantic `AwareDatetime`. This is what refuses a value
 without a time zone. The database would accept one silently.
+
+Three things were found on 2026-11-24, before the work. All three are settled in the code: the
+status is worked out inside the model, the framework's tables are created at start, and the
+test for `get_agent_runner` moved to `tests/routers/test_dependencies.py` together with the
+function. The reasons, for whoever changes this code later:
+
+- **`status` must not be a required field that only the list fills.** `UserInfo` is also built
+  for every ordinary request, in `UserManager.authorize`, from a statement that does not return
+  a status. A required field would make every request of every person fail. Either work the
+  status out inside the model from `is_active` and `activated_at`, or return it from every
+  statement that returns an account. The filter in the `WHERE` uses the same three rules, and
+  one test should hold the two together.
+- **Create the framework's tables at start.** The framework creates its tables the first time
+  one of its methods is used, not when the backend starts. On the real database they exist. On
+  a new, empty one, the statement of 2.10 would fail with "relation sessions does not exist"
+  until somebody opens the chat. `DatabaseSessionService.prepare_tables()` is the framework's
+  own method for creating them early. Call it once in `data_agent/app.py`, where the service
+  is created.
+- **Moving `get_agent_runner` touches a test.** `tests/routers/test_agent.py` imports it from
+  `data_agent.routers.agent` and uses it to put a fake in its place. After the move, either
+  keep the name importable from there or change the import in the test. The test must replace
+  the same function object that the router uses.
 
 ### 2.10 Sketch
 
@@ -495,33 +586,50 @@ LIMIT :limit OFFSET :offset
 `strpos` is used instead of `LIKE` because it has no wildcard characters, so nothing a person
 types has to be escaped.
 
-### 2.11 Tests, and what was already checked
+The statement as built is in `data_agent/infra/session_repository.py`. It differs from the
+sketch only in passing the title key and the word `idle` as parameters.
 
-Unit tests, with the database mocked, as the other tests of this repo do:
+### 2.11 Tests, and how this was checked
 
-| File | What to add |
+Unit tests, with the database mocked, as the other tests of this repo do. One test function per
+function, named after it:
+
+| File | What it covers |
 |---|---|
+| `tests/schemas/test_schemas.py` (new) | `UserInfo.status`: the three statuses, an admin who was never approved, and that a status sent along with the data cannot overrule the approval columns |
+| `tests/utils/test_text.py` (new) | `normalize_text_filter` |
+| `tests/infra/test_user_repository.py` | The SQL and parameters of `list_users`, `count_users`, `list_all_access_logs`, `count_all_access_logs`. The new index |
+| `tests/infra/test_session_repository.py` (new) | The SQL and parameters of `list_sessions` and `count_sessions`. The app name is always part of the condition, and the framework's table is only read |
+| `tests/services/test_user_manager.py` | Filters are passed on, `total` is returned, an empty filter becomes "no filter", a failing count is not swallowed |
+| `tests/services/test_agent_runner.py` | `list_all_sessions` |
 | `tests/routers/test_admin.py` | The two new addresses in the "admins only" test. Filters arrive in the request model. 422 for an unknown `status`, a `limit` out of range, a date without a time zone |
-| `tests/services/test_user_manager.py` | Filters are passed on. `total` is returned |
-| `tests/infra/test_user_repository.py` | The SQL and parameters of the new and changed methods |
-| `tests/infra/test_session_repository.py` (new) | The SQL and parameters. The app name is always part of the condition |
-| `tests/services/test_agent_runner.py`, `tests/test_app.py` | The new method, and the new piece created at start |
+| `tests/routers/test_dependencies.py`, `test_agent.py` | `get_agent_runner` at its new place |
+| `tests/test_app.py` | The new addresses exist. The session repository is created, and `prepare_tables()` is awaited at start |
 
-Already checked on 2026-11-23, on a throwaway Postgres 16 on the development PC, with the
-framework's real tables created by version 2.4.0 and the database clock set 9 hours ahead of
-UTC:
+Result on 2026-11-24: 185 tests pass and 1 fails. The failing one is the same as before,
+`tests/services/test_agent_runner.py::TestAgentRunner::test_run`, and has nothing to do with
+this work. Before the work the count was 174 passing.
 
-- The `sessions` table has the six columns of check 1, and the times in it are UTC.
-- The statement of 2.10 and the matching ones for accounts and visits return the right rows for
-  every filter in 2.4 to 2.6, including Korean text, a search for `_` and `%`, an exact
-  `user_id` in another case, and a date with `+09:00`.
-- The three status rules give `waiting`, `active` and `deactivated` for a new account, an
-  approved one, and one that was approved and deactivated. An admin who was never approved
-  comes out as `waiting`.
-- A request model declared with `Depends()` answers 422 for the bad values listed above.
+One check went beyond the unit tests, on a throwaway Postgres 16 on the development PC, with the
+framework's real tables and the database clock set 9 hours ahead of UTC. The real routers, the
+real services and repositories, and the real pass check were called over HTTP with a signed
+pass, 72 checks in all:
 
-Not checked: none of this ran against the database on `10.240.35.180`. Part 1 covers the two
-facts that could differ there.
+- No pass gives 401. A person who is not an admin gets 403 `admin_required` on all three lists.
+- Accounts: every filter of 2.4 alone and combined, pages, `total`, and 422 for bad values.
+  Activating and deactivating change the status as described. For every account, the status
+  filter and the status in the reply agree.
+- Access log: `user_id` for `j.kim` does not bring `hj.kim`, while `search` does. Search by IP
+  address. Date limits, also written with `+09:00`. The list of one person still works.
+- Sessions: only chats of this app, title or `null`, running or idle, and `created_at` is the
+  real moment although the database clock is 9 hours ahead. All filters of 2.6.
+- On a new, empty database the session list fails without `prepare_tables()` and works with it.
+- The rest is unchanged: a person's own chat list, the refusal of a waiting person, the refusal
+  of an admin who asks for another person's chats, and `/auth/me` without a `status` field.
+
+Not checked: the new code has not run against the database on `10.240.35.180`. The two facts
+that could differ there, the columns of the chat table and the time zone of its times, were
+confirmed on that database on 2026-11-24 (Part 1).
 
 ### 2.12 Trying the backend without the page
 
@@ -864,7 +972,14 @@ In addition:
 - To get a second person, restart the stand-in with another `MOCK_LOGIN_ID` and open the app
   once. That person is then waiting.
 
-Static checks, all of which should pass:
+**Before starting: the icon file.** `src/components/chat/session-sidebar.tsx` imports
+`@/app/dice_icon.png`. That file was never added to git, and it is not on the development PC.
+On 2026-11-24 `npm run build` stops there with "Module not found", and `npm run dev` cannot show
+the chat either. The real file is on the server, where the image was built. Copy it into
+`src/app/` on the development PC and commit it. Do not commit a stand-in picture: the next
+build on the server would then show the stand-in.
+
+Static checks:
 
 ```
 npm run lint
@@ -872,6 +987,14 @@ npx tsc --noEmit
 npm run build
 NEXT_PUBLIC_BASE_PATH=/data-agent npm run build
 ```
+
+Where they stand before this work, on 2026-11-24:
+
+| Check | Before this work | Rule for this work |
+|---|---|---|
+| `npm run lint` | 5 errors and 8 warnings, in `chat-view.tsx`, `message-item.tsx`, `session-sidebar.tsx` and `theme-provider.tsx` | No new problem. The existing ones are in the chat code and are not part of this work |
+| `npx tsc --noEmit` | Passes | Passes |
+| `npm run build`, both ways | Fails on the missing icon file | Passes, once the icon is in place |
 
 Then try, with and without the base path where it matters:
 
@@ -909,6 +1032,10 @@ Build and start both the same way as for the login work
 (`data-agent-auth-deploy-and-test-2026-11-22.md`, steps A4, B1 and B4). What differs:
 
 - No setting, no secret and no forwarding rule changes.
+- **Use the names that are real on the server.** That document, and the run scripts in both
+  repos, call the backend container `da_backend`. On the server it is `data_agent_backend`
+  (seen on 2026-11-24). The other names (frontend container, images, Docker network) were not
+  checked. `sudo docker ps --format '{{.Names}}  {{.Image}}  {{.Networks}}'` shows them all.
 - If the backend run script has the option `-e FORWARDED_ALLOW_IPS=...`, it stays.
 - The two `docker tag` lines of step A4 would overwrite the images saved before the login work.
   Use a new name, for example `da-backend:before-admin` and `da-frontend:before-admin`.

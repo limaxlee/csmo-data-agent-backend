@@ -7,9 +7,10 @@ from data_agent.infra import UserRepository
 from data_agent.schemas import (
     SsoIdentity, UserInfo, GetCurrentUserResponse, ListUsersRequest, ListUsersResponse,
     UpdateUserRequest, UpdateUserResponse, UserAccessLogInfo, ListUserAccessLogsRequest,
-    ListUserAccessLogsResponse, AdminInfo, ListAdminsResponse, AddAdminResponse
+    ListUserAccessLogsResponse, ListAllAccessLogsRequest, ListAllAccessLogsResponse,
+    AdminInfo, ListAdminsResponse, AddAdminResponse
 )
-from data_agent.utils import normalize_user_id
+from data_agent.utils import normalize_user_id, normalize_text_filter
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +74,18 @@ class UserManager:
             raise
 
     async def list_users(self, request: ListUsersRequest) -> ListUsersResponse:
+        filters = {
+            "search": normalize_text_filter(request.search),
+            "status": request.status,
+            "is_active": request.is_active,
+            "is_admin": request.is_admin
+        }
         try:
-            users = await self._users.list_users(is_active=request.is_active)
+            users = await self._users.list_users(**filters, limit=request.limit, offset=request.offset)
+            total = await self._users.count_users(**filters)
 
-            logger.info(f"Listed {len(users)} user(s)")
-            return ListUsersResponse(users=[UserInfo(**user) for user in users])
+            logger.info(f"Listed {len(users)} of {total} user(s)")
+            return ListUsersResponse(users=[UserInfo(**user) for user in users], total=total)
         except Exception as e:
             logger.exception(f"Failed to list users: {str(e)}")
             raise
@@ -117,6 +125,30 @@ class UserManager:
 
         logger.info(f"Listed {len(access_logs)} access log(s) of user {user_id}")
         return ListUserAccessLogsResponse(access_logs=[UserAccessLogInfo(**item) for item in access_logs])
+
+    async def list_all_access_logs(self, request: ListAllAccessLogsRequest) -> ListAllAccessLogsResponse:
+        filters = {
+            "user_id": normalize_text_filter(request.user_id),
+            "search": normalize_text_filter(request.search),
+            "accessed_from": request.accessed_from,
+            "accessed_to": request.accessed_to
+        }
+        try:
+            access_logs = await self._users.list_all_access_logs(
+                **filters,
+                limit=request.limit,
+                offset=request.offset
+            )
+            total = await self._users.count_all_access_logs(**filters)
+
+            logger.info(f"Listed {len(access_logs)} of {total} access log(s) of all users")
+            return ListAllAccessLogsResponse(
+                access_logs=[UserAccessLogInfo(**item) for item in access_logs],
+                total=total
+            )
+        except Exception as e:
+            logger.exception(f"Failed to list access logs of all users: {str(e)}")
+            raise
 
     async def list_admins(self) -> ListAdminsResponse:
         try:

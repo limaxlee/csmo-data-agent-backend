@@ -1,25 +1,17 @@
 import logging
 from typing import Annotated
-from fastapi import APIRouter, status, HTTPException, Path, Depends, Request, Response, UploadFile, File
+from fastapi import APIRouter, status, HTTPException, Path, Depends, Response, UploadFile, File
 
-from data_agent.routers.dependencies import require_session_owner
+from data_agent.routers.dependencies import AgentRunnerDep, require_session_owner
 from data_agent.schemas import (
     CreateSessionResponse, ListSessionsResponse, GetSessionResponse,
     LoadSessionArtifactRequest, GetRunStateResponse, RenameSessionRequest,
     CreateSessionTitleResponse, RunAgentRequest, RunAgentResponse
 )
-from data_agent.services import AgentRunner
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/apps", tags=["runner"], dependencies=[Depends(require_session_owner)])
-
-
-def get_agent_runner(request: Request) -> AgentRunner:
-    return request.app.state.agent_runner
-
-
-AgentRunnerDep = Annotated[AgentRunner, Depends(get_agent_runner)]
 
 
 @router.post(

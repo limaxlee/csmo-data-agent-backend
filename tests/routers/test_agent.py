@@ -6,8 +6,10 @@ from starlette import status
 
 from common.constants import RunState
 from data_agent.exceptions import register_exception_handlers
-from data_agent.routers.agent import get_agent_runner, router
-from data_agent.routers.dependencies import get_token_verifier, get_user_manager, require_session_owner
+from data_agent.routers.agent import router
+from data_agent.routers.dependencies import (
+    get_agent_runner, get_token_verifier, get_user_manager, require_session_owner
+)
 from data_agent.schemas import (
     CreateSessionResponse, ListSessionsResponse, LoadSessionArtifactResponse,
     GetRunStateResponse, CreateSessionTitleResponse, RunAgentResponse, SessionInfo,
@@ -38,13 +40,6 @@ class TestAgentRoutes:
         app.dependency_overrides[get_agent_runner] = lambda: agent_runner
         app.dependency_overrides[require_session_owner] = lambda: None
         return TestClient(app)
-
-    def test_get_agent_runner(self, mocker):
-        request = mocker.MagicMock()
-        runner = mocker.MagicMock()
-        request.app.state.agent_runner = runner
-
-        assert get_agent_runner(request) is runner
 
     def test_requires_session_owner(self, mocker, agent_runner):
         token_verifier = mocker.MagicMock()

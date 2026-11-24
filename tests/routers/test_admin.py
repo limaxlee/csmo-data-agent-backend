@@ -4,14 +4,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette import status
 
-from common.constants import AuthErrorCode, MAX_ACCESS_LOG_LIMIT
+from common.constants import (
+    AuthErrorCode, RunState, UserStatus, MAX_USER_LIMIT, MAX_ACCESS_LOG_LIMIT, MAX_SESSION_LIMIT
+)
 from data_agent.exceptions import AuthError, register_exception_handlers
 from data_agent.routers.admin import router
-from data_agent.routers.dependencies import get_token_verifier, get_user_manager
+from data_agent.routers.dependencies import get_agent_runner, get_token_verifier, get_user_manager
 from data_agent.schemas import (
     SsoIdentity, UserInfo, ListUsersRequest, ListUsersResponse, UpdateUserRequest, UpdateUserResponse,
-    UserAccessLogInfo, ListUserAccessLogsRequest, ListUserAccessLogsResponse, AdminInfo,
-    ListAdminsResponse, AddAdminResponse
+    UserAccessLogInfo, ListUserAccessLogsRequest, ListUserAccessLogsResponse, ListAllAccessLogsRequest,
+    ListAllAccessLogsResponse, SessionSummaryInfo, ListAllSessionsRequest, ListAllSessionsResponse,
+    AdminInfo, ListAdminsResponse, AddAdminResponse
 )
 
 _NOW = datetime(2026, 11, 22, 10, 15, tzinfo=timezone.utc)
@@ -40,19 +43,26 @@ class TestAdminRoutes:
         return manager
 
     @pytest.fixture
-    def client(self, token_verifier, user_manager):
+    def agent_runner(self, mocker):
+        return mocker.MagicMock()
+
+    @pytest.fixture
+    def client(self, token_verifier, user_manager, agent_runner):
         app = FastAPI()
         app.include_router(router)
         register_exception_handlers(app)
         app.dependency_overrides[get_token_verifier] = lambda: token_verifier
         app.dependency_overrides[get_user_manager] = lambda: user_manager
+        app.dependency_overrides[get_agent_runner] = lambda: agent_runner
         return TestClient(app)
 
-    def test_requires_admin(self, mocker, client, user_manager):
+    def test_requires_admin(self, mocker, client, user_manager, agent_runner):
         requests = [
             ("GET", "/admin/users"),
             ("PATCH", "/admin/users/user.one?is_active=true"),
             ("GET", "/admin/users/user.one/access-log"),
+            ("GET", "/admin/access-log"),
+            ("GET", "/admin/sessions"),
             ("GET", "/admin/admins"),
             ("PUT", "/admin/admins/user.one"),
             ("DELETE", "/admin/admins/user.one")
@@ -75,24 +85,48 @@ class TestAdminRoutes:
         user_manager.is_admin.assert_awaited_with("admin.one")
         user_manager.list_users.assert_not_called()
         user_manager.update_user.assert_not_called()
+        user_manager.list_all_access_logs.assert_not_called()
         user_manager.add_admin.assert_not_called()
         user_manager.delete_admin.assert_not_called()
+        agent_runner.list_all_sessions.assert_not_called()
 
     def test_list_users(self, mocker, client, user_manager):
         user_manager.list_users = mocker.AsyncMock(return_value=ListUsersResponse(
-            users=[UserInfo(**_user()), UserInfo(**_user("user.two", is_active=True))]
+            users=[UserInfo(**_user()), UserInfo(**_user("user.two", is_active=True))],
+            total=12
         ))
 
         response = client.get("/admin/users", headers=_HEADERS)
 
         assert response.status_code == status.HTTP_200_OK
         assert [user["user_id"] for user in response.json()["users"]] == ["user.one", "user.two"]
+        assert [user["status"] for user in response.json()["users"]] == ["waiting", "active"]
+        assert response.json()["total"] == 12
         assert user_manager.list_users.await_args.kwargs["request"] == ListUsersRequest(is_active=None)
 
         response = client.get("/admin/users?is_active=false", headers=_HEADERS)
 
         assert response.status_code == status.HTTP_200_OK
         assert user_manager.list_users.await_args.kwargs["request"] == ListUsersRequest(is_active=False)
+
+        response = client.get(
+            "/admin/users?search=hong&status=waiting&is_admin=false&limit=10&offset=20",
+            headers=_HEADERS
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert user_manager.list_users.await_args.kwargs["request"] == ListUsersRequest(
+            search="hong",
+            status=UserStatus.WAITING,
+            is_admin=False,
+            limit=10,
+            offset=20
+        )
+
+        for query in ["status=unknown", "limit=0", f"limit={MAX_USER_LIMIT + 1}", "offset=-1", "is_admin=maybe"]:
+            response = client.get(f"/admin/users?{query}", headers=_HEADERS)
+
+            assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
         user_manager.list_users = mocker.AsyncMock(side_effect=Exception("Runtime error"))
         response = client.get("/admin/users", headers=_HEADERS)
@@ -182,6 +216,137 @@ class TestAdminRoutes:
         response = client.get("/admin/users/user.one/access-log", headers=_HEADERS)
 
         assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    def test_list_all_access_logs(self, mocker, client, user_manager):
+        user_manager.list_all_access_logs = mocker.AsyncMock(return_value=ListAllAccessLogsResponse(
+            access_logs=[UserAccessLogInfo(user_id="user.one", accessed_at=_NOW, ip_address="10.0.0.1")],
+            total=40
+        ))
+
+        response = client.get("/admin/access-log", headers=_HEADERS)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == {
+            "access_logs": [{
+                "user_id": "user.one",
+                "accessed_at": "2026-11-22T10:15:00Z",
+                "ip_address": "10.0.0.1",
+                "user_agent": None
+            }],
+            "total": 40
+        }
+        assert user_manager.list_all_access_logs.await_args.kwargs == {"request": ListAllAccessLogsRequest()}
+
+        response = client.get(
+            "/admin/access-log?user_id=user.one&search=10.0&limit=10&offset=20"
+            "&accessed_from=2026-11-22T10:15:00Z&accessed_to=2026-11-22T19:15:00%2B09:00",
+            headers=_HEADERS
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert user_manager.list_all_access_logs.await_args.kwargs["request"] == ListAllAccessLogsRequest(
+            user_id="user.one",
+            search="10.0",
+            accessed_from=_NOW,
+            accessed_to=_NOW,
+            limit=10,
+            offset=20
+        )
+
+        for query in [
+            "accessed_from=2026-11-22T10:15:00",
+            "accessed_to=2026-11-22",
+            "limit=0",
+            f"limit={MAX_ACCESS_LOG_LIMIT + 1}",
+            "offset=-1"
+        ]:
+            response = client.get(f"/admin/access-log?{query}", headers=_HEADERS)
+
+            assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+        user_manager.list_all_access_logs = mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        response = client.get("/admin/access-log", headers=_HEADERS)
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"] == "Runtime error"
+
+    def test_list_all_sessions(self, mocker, client, agent_runner):
+        agent_runner.list_all_sessions = mocker.AsyncMock(return_value=ListAllSessionsResponse(
+            sessions=[
+                SessionSummaryInfo(
+                    user_id="user.one",
+                    session_id="session-1",
+                    session_title="Greetings",
+                    created_at=_NOW,
+                    last_update_time=_NOW,
+                    run_state=RunState.RUNNING
+                ),
+                SessionSummaryInfo(user_id="user.two", session_id="session-2", created_at=_NOW, last_update_time=_NOW)
+            ],
+            total=30
+        ))
+
+        response = client.get("/admin/sessions", headers=_HEADERS)
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json() == {
+            "sessions": [
+                {
+                    "user_id": "user.one",
+                    "session_id": "session-1",
+                    "session_title": "Greetings",
+                    "created_at": "2026-11-22T10:15:00Z",
+                    "last_update_time": "2026-11-22T10:15:00Z",
+                    "run_state": "running"
+                },
+                {
+                    "user_id": "user.two",
+                    "session_id": "session-2",
+                    "session_title": None,
+                    "created_at": "2026-11-22T10:15:00Z",
+                    "last_update_time": "2026-11-22T10:15:00Z",
+                    "run_state": "idle"
+                }
+            ],
+            "total": 30
+        }
+        assert agent_runner.list_all_sessions.await_args.kwargs == {"request": ListAllSessionsRequest()}
+
+        response = client.get(
+            "/admin/sessions?user_id=user.one&search=Greetings&limit=10&offset=20"
+            "&created_from=2026-11-22T10:15:00Z&created_to=2026-11-22T19:15:00%2B09:00"
+            "&updated_from=2026-11-22T10:15:00Z&updated_to=2026-11-22T10:15:00Z",
+            headers=_HEADERS
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert agent_runner.list_all_sessions.await_args.kwargs["request"] == ListAllSessionsRequest(
+            user_id="user.one",
+            search="Greetings",
+            created_from=_NOW,
+            created_to=_NOW,
+            updated_from=_NOW,
+            updated_to=_NOW,
+            limit=10,
+            offset=20
+        )
+
+        for query in [
+            "created_from=2026-11-22T10:15:00",
+            "updated_to=2026-11-22",
+            "limit=0",
+            f"limit={MAX_SESSION_LIMIT + 1}",
+            "offset=-1"
+        ]:
+            response = client.get(f"/admin/sessions?{query}", headers=_HEADERS)
+
+            assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+        agent_runner.list_all_sessions = mocker.AsyncMock(side_effect=Exception("Runtime error"))
+        response = client.get("/admin/sessions", headers=_HEADERS)
+
+        assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+        assert response.json()["detail"] == "Runtime error"
 
     def test_list_admins(self, mocker, client, user_manager):
         user_manager.list_admins = mocker.AsyncMock(return_value=ListAdminsResponse(

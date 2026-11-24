@@ -1,9 +1,14 @@
 import pytest
+from datetime import datetime, timezone
 from fastapi import UploadFile
 
 from common.constants import RunState
-from data_agent.schemas import LoadSessionArtifactRequest, RenameSessionRequest, RunAgentRequest
+from data_agent.schemas import (
+    LoadSessionArtifactRequest, RenameSessionRequest, RunAgentRequest, ListAllSessionsRequest
+)
 from data_agent.services.agent_runner import AgentRunner
+
+_NOW = datetime(2026, 11, 24, 10, 15, tzinfo=timezone.utc)
 
 
 def _build_event(mocker, author, texts):
@@ -33,7 +38,8 @@ class TestAgentRunner:
             session_service=session_service,
             artifact_service=mocker.MagicMock(),
             title_generator=mocker.MagicMock(),
-            session_lock=session_lock
+            session_lock=session_lock,
+            session_repository=mocker.MagicMock()
         )
 
     @pytest.mark.asyncio
@@ -76,6 +82,103 @@ class TestAgentRunner:
         agent_runner._session_service.list_sessions = mocker.AsyncMock(side_effect=Exception('Runtime error'))
         with pytest.raises(Exception):
             await agent_runner.list_sessions(user_id='user-1')
+
+    @pytest.mark.asyncio
+    async def test_list_all_sessions(self, mocker, agent_runner):
+        session_repository = agent_runner._session_repository
+
+        session_repository.list_sessions = mocker.AsyncMock(return_value=[
+            {
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "session_title": "Greetings",
+                "created_at": _NOW,
+                "last_update_time": _NOW,
+                "run_state": "running"
+            },
+            {
+                "user_id": "user-2",
+                "session_id": "session-2",
+                "session_title": None,
+                "created_at": _NOW,
+                "last_update_time": _NOW,
+                "run_state": "idle"
+            }
+        ])
+        session_repository.count_sessions = mocker.AsyncMock(return_value=30)
+
+        result = await agent_runner.list_all_sessions(ListAllSessionsRequest())
+
+        assert [session.session_id for session in result.sessions] == ["session-1", "session-2"]
+        assert result.sessions[0].user_id == "user-1"
+        assert result.sessions[0].session_title == "Greetings"
+        assert result.sessions[0].created_at == _NOW
+        assert result.sessions[0].run_state == RunState.RUNNING
+        assert result.sessions[1].session_title is None
+        assert result.sessions[1].run_state == RunState.IDLE
+        assert result.total == 30
+
+        filters = {
+            "user_id": None,
+            "search": None,
+            "created_from": None,
+            "created_to": None,
+            "updated_from": None,
+            "updated_to": None
+        }
+
+        session_repository.list_sessions.assert_awaited_once_with(
+            app_name=agent_runner._app_name,
+            **filters,
+            limit=50,
+            offset=0
+        )
+        session_repository.count_sessions.assert_awaited_once_with(app_name=agent_runner._app_name, **filters)
+
+        session_repository.list_sessions = mocker.AsyncMock(return_value=[])
+        session_repository.count_sessions = mocker.AsyncMock(return_value=0)
+
+        result = await agent_runner.list_all_sessions(ListAllSessionsRequest(
+            user_id=" User-1 ",
+            search=" Greetings ",
+            created_from=_NOW,
+            created_to=_NOW,
+            updated_from=_NOW,
+            updated_to=_NOW,
+            limit=10,
+            offset=20
+        ))
+
+        assert result.sessions == []
+        assert result.total == 0
+
+        filters = {
+            "user_id": "User-1",
+            "search": "Greetings",
+            "created_from": _NOW,
+            "created_to": _NOW,
+            "updated_from": _NOW,
+            "updated_to": _NOW
+        }
+
+        session_repository.list_sessions.assert_awaited_once_with(
+            app_name=agent_runner._app_name,
+            **filters,
+            limit=10,
+            offset=20
+        )
+        session_repository.count_sessions.assert_awaited_once_with(app_name=agent_runner._app_name, **filters)
+
+        # An empty filter is no filter: it must not be searched for as an empty login ID.
+        await agent_runner.list_all_sessions(ListAllSessionsRequest(user_id="", search="   "))
+
+        assert session_repository.list_sessions.await_args.kwargs["user_id"] is None
+        assert session_repository.list_sessions.await_args.kwargs["search"] is None
+
+        session_repository.list_sessions = mocker.AsyncMock(side_effect=Exception("Runtime error"))
+
+        with pytest.raises(Exception, match="Runtime error"):
+            await agent_runner.list_all_sessions(ListAllSessionsRequest())
 
     @pytest.mark.asyncio
     async def test_delete_session(self, mocker, agent_runner):

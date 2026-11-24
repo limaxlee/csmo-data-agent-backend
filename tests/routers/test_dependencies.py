@@ -7,7 +7,7 @@ from starlette import status
 from common.constants import AuthErrorCode, MAX_USER_AGENT_LENGTH
 from data_agent.exceptions import AuthError, register_exception_handlers
 from data_agent.routers.dependencies import (
-    ActiveUserDep, AdminDep, IdentityDep, get_client_ip, get_identity, get_token_verifier,
+    ActiveUserDep, AdminDep, IdentityDep, get_agent_runner, get_client_ip, get_identity, get_token_verifier,
     get_user_agent, get_user_manager, require_active_user, require_admin, require_session_owner
 )
 from data_agent.schemas import SsoIdentity, UserInfo
@@ -80,6 +80,13 @@ class TestDependencies:
         request.app.state.user_manager = manager
 
         assert get_user_manager(request) is manager
+
+    def test_get_agent_runner(self, mocker):
+        request = mocker.MagicMock()
+        runner = mocker.MagicMock()
+        request.app.state.agent_runner = runner
+
+        assert get_agent_runner(request) is runner
 
     def test_get_client_ip(self, mocker):
         request = mocker.MagicMock()

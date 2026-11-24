@@ -1,8 +1,11 @@
 from typing import Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AwareDatetime, computed_field
 
-from common.constants import DEFAULT_ACCESS_LOG_LIMIT, MAX_ACCESS_LOG_LIMIT
+from common.constants import (
+    UserStatus, MAX_USER_ID_LENGTH, MAX_SEARCH_LENGTH, DEFAULT_USER_LIMIT, MAX_USER_LIMIT,
+    DEFAULT_ACCESS_LOG_LIMIT, MAX_ACCESS_LOG_LIMIT
+)
 
 
 class SsoIdentity(BaseModel):
@@ -34,6 +37,18 @@ class UserInfo(BaseModel):
     last_access_at: datetime | None = None
     last_access_ip: str | None = None
 
+    # Worked out from the approval columns, so it is never missing, whichever statement read the account.
+    @computed_field
+    @property
+    def status(self) -> UserStatus:
+        if self.is_active:
+            return UserStatus.ACTIVE
+
+        if self.activated_at is None:
+            return UserStatus.WAITING
+
+        return UserStatus.DEACTIVATED
+
 
 class GetCurrentUserResponse(BaseModel):
     user_id: str
@@ -47,11 +62,17 @@ class GetCurrentUserResponse(BaseModel):
 
 
 class ListUsersRequest(BaseModel):
+    search: str | None = Field(default=None, max_length=MAX_SEARCH_LENGTH)
+    status: UserStatus | None = None
     is_active: bool | None = None
+    is_admin: bool | None = None
+    limit: int = Field(default=DEFAULT_USER_LIMIT, ge=1, le=MAX_USER_LIMIT)
+    offset: int = Field(default=0, ge=0)
 
 
 class ListUsersResponse(BaseModel):
     users: list[UserInfo] = []
+    total: int = 0
 
 
 class UpdateUserRequest(BaseModel):
@@ -75,6 +96,20 @@ class ListUserAccessLogsRequest(BaseModel):
 
 class ListUserAccessLogsResponse(BaseModel):
     access_logs: list[UserAccessLogInfo] = []
+
+
+class ListAllAccessLogsRequest(BaseModel):
+    user_id: str | None = Field(default=None, max_length=MAX_USER_ID_LENGTH)
+    search: str | None = Field(default=None, max_length=MAX_SEARCH_LENGTH)
+    accessed_from: AwareDatetime | None = None
+    accessed_to: AwareDatetime | None = None
+    limit: int = Field(default=DEFAULT_ACCESS_LOG_LIMIT, ge=1, le=MAX_ACCESS_LOG_LIMIT)
+    offset: int = Field(default=0, ge=0)
+
+
+class ListAllAccessLogsResponse(BaseModel):
+    access_logs: list[UserAccessLogInfo] = []
+    total: int = 0
 
 
 class AdminInfo(BaseModel):

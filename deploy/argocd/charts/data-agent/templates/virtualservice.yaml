@@ -1,0 +1,53 @@
+{{- if .Values.virtualService.enabled }}
+{{- $vs := .Values.virtualService }}
+# Forwarding rule:
+#   {{ $vs.path }} and {{ $vs.path }}/...  ->  frontend, path unchanged
+#
+# The backend and the two MCP servers are not forwarded. The browser only
+# talks to the frontend server, which passes backend calls on by itself.
+# The login paths (/auth/...) are forwarded on the same host by the
+# defect-studio rule, so they are not repeated here.
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ $vs.name }}
+spec:
+  hosts:
+    {{- toYaml $vs.hosts | nindent 4 }}
+  gateways:
+    {{- toYaml $vs.gateways | nindent 4 }}
+  http:
+    {{- if $vs.redirectHttpToHttps }}
+    # http -> https
+    - match:
+        - port: 80
+          uri:
+            prefix: {{ $vs.path }}
+      redirect:
+        scheme: https
+        port: 443
+        redirectCode: 308
+    {{- end }}
+    # Both spellings are forwarded and neither is redirected here: the
+    # frontend itself redirects {{ $vs.path }}/ to {{ $vs.path }}, so a redirect in the
+    # other direction at this point would loop forever.
+    # No timeout is set: Istio leaves it off by default, so long answers
+    # are not cut.
+    - match:
+        - uri:
+            exact: {{ $vs.path }}
+        - uri:
+            prefix: {{ $vs.path }}/
+      {{- if $vs.removeCookies }}
+      headers:
+        request:
+          remove:
+            - cookie
+      {{- end }}
+      route:
+        - destination:
+            host: {{ .Values.namePrefix }}-frontend.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.frontend.port }}
+{{- end }}

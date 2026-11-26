@@ -1,0 +1,76 @@
+{{- $name := .Values.namePrefix -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-mongodb-mcp
+  labels:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: mongodb-mcp
+spec:
+  replicas: {{ .Values.mongodbMcp.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: data-agent
+      app.kubernetes.io/component: mongodb-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: data-agent
+        app.kubernetes.io/component: mongodb-mcp
+    spec:
+      enableServiceLinks: false
+      imagePullSecrets:
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      containers:
+        - name: mongodb-mcp
+          image: "{{ .Values.mongodbMcp.image }}:{{ required "mongodbMcp.tag is required" .Values.mongodbMcp.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.mongodbMcp.port }}
+          env:
+            - name: SERVER_PORT
+              value: {{ .Values.mongodbMcp.port | quote }}
+            {{- range $k, $v := .Values.mongodbMcp.env }}
+            {{- if not (empty $v) }}
+            - name: {{ $k }}
+              value: {{ $v | toString | quote }}
+            {{- end }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.mongodbMcp.resources | nindent 12 }}
+          # The server's own GET /health also asks MongoDB. A pod must not
+          # be taken out of service because the database is slow, so the
+          # checks only ask whether the port is open.
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-mongodb-mcp
+  labels:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: mongodb-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: mongodb-mcp
+  ports:
+    - name: http
+      port: {{ .Values.mongodbMcp.port }}
+      targetPort: http

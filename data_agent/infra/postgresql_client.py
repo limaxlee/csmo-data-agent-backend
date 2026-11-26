@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 from sqlalchemy import text
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from common.config import SETTINGS
@@ -10,7 +11,17 @@ logger = logging.getLogger(__name__)
 
 def postgresql_dsn(db_name: str | None = None) -> str:
     db = SETTINGS.postgresql_db
-    return f"postgresql+asyncpg://{db.user}@{db.host}:{db.port}/{db_name or db.name}"
+    url = URL.create(
+        drivername="postgresql+asyncpg",
+        username=db.user,
+        password=db.password or None,
+        host=db.host,
+        port=db.port,
+        database=db_name or db.name
+    )
+
+    # The password is written into the address with its special characters escaped. Never log this value.
+    return url.render_as_string(hide_password=False)
 
 
 class PostgreSQLClient:

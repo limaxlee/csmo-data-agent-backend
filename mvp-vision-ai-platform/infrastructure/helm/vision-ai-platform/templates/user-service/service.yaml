@@ -1,0 +1,17 @@
+{{- if .Values.userService.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.userService.fullname" . }}
+  labels:
+    {{- include "vision-ai.userService.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.userService.service.type }}
+  ports:
+    - port: {{ .Values.userService.service.port }} 
+      targetPort: {{ .Values.userService.service.targetPort }} 
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "vision-ai.userService.selectorLabels" . | nindent 4 }}
+{{- end }}

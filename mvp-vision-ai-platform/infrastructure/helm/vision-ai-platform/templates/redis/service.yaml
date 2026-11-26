@@ -1,0 +1,32 @@
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.redis.fullname" . }}
+  labels:
+    {{- include "vision-ai.redis.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: tcp-redis
+      port: 6379
+      targetPort: redis
+  selector:
+    {{- include "vision-ai.redis.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.redis.fullname" . }}-headless
+  labels:
+    {{- include "vision-ai.redis.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - name: tcp-redis
+      port: 6379
+      targetPort: redis
+  selector:
+    {{- include "vision-ai.redis.selectorLabels" . | nindent 4 }}
+{{- end }}
+

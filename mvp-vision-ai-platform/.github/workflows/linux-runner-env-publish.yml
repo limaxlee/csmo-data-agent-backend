@@ -1,0 +1,594 @@
+name: Publish Linux Runner Envs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/linux-runner-env-publish.yml'
+      - 'platform/scripts/pack_runner_env.sh'
+      - 'platform/scripts/prepare_runner_env_legacy_asset.py'
+      - 'platform/scripts/prepare_dice_v1_converter_dir.py'
+      - 'platform/scripts/upload_runner_env_bundle.py'
+      - 'runner/scripts/pack-env.sh'
+      - 'runner/dice-v1-converter/**'
+      - 'platform/trainers/**/legacy-assets.json'
+      - 'platform/trainers/**/pyproject.toml'
+      - 'platform/trainers/**/uv.lock'
+      - 'platform/trainers/**/requirements*.in'
+      - 'platform/trainers/**/requirements*.txt'
+      - 'platform/envs/**/pyproject.toml'
+      - 'platform/envs/**/uv.lock'
+      - 'platform/envs/**/requirements*.in'
+      - 'platform/envs/**/requirements*.txt'
+      - 'platform/dice-serving/**'
+  workflow_dispatch:
+    inputs:
+      frameworks:
+        description: 'Frameworks to publish: changed, all, or comma-separated names'
+        required: false
+        default: 'changed'
+        type: string
+      force_upload:
+        description: 'Replace existing bundle object for the same version'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      dry_run:
+        description: 'Pack bundles and print upload actions without writing to S3'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      skip_validate:
+        description: 'Skip dice-runner bundle validation'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      keep_per_alias:
+        description: 'Number of old versions to retain per framework alias'
+        required: false
+        default: '5'
+        type: string
+      python_release:
+        description: 'python-build-standalone release tag'
+        required: false
+        default: 'latest'
+        type: string
+      single_put:
+        description: 'Disable multipart upload'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      payload_signing:
+        description: 'Enable S3 payload signing'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-runner-env-publish
+  cancel-in-progress: false
+
+env:
+  ALL_FRAMEWORKS: huggingface onnx-shared openmm-cpu-py38 openmm-cpu-py39 openmm-cu118 openmm-cu118-external openmm-cu128 openmm-cu128-external timm ultralytics vfm-v1 vfm-v1-cu128 vfm-v3-det-bastion
+  S3_BUCKET: ${{ vars.S3_BUCKET || secrets.S3_BUCKET }}
+  RUNNER_ENV_STORAGE_PREFIX: ${{ vars.RUNNER_ENV_LINUX_STORAGE_PREFIX || vars.RUNNER_ENV_STORAGE_PREFIX || 'runner-envs/linux' }}
+  RUNNER_ENV_PYTHON_TARBALL_PREFIX: ${{ vars.RUNNER_ENV_PYTHON_TARBALL_PREFIX || 'runner-env-assets/python-build-standalone/linux/x86_64' }}
+  RUNNER_ENV_NO_VERIFY_SSL: ${{ vars.RUNNER_ENV_NO_VERIFY_SSL || 'false' }}
+  S3_ENDPOINT: ${{ vars.S3_ENDPOINT || secrets.S3_ENDPOINT }}
+  S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+  S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+  S3_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+
+jobs:
+  setup:
+    runs-on: [code-linux, code-xlarge]
+    outputs:
+      frameworks: ${{ steps.select.outputs.frameworks }}
+      frameworks_json: ${{ steps.select.outputs.frameworks_json }}
+      frameworks_csv: ${{ steps.select.outputs.frameworks_csv }}
+      count: ${{ steps.select.outputs.count }}
+      version: ${{ steps.select.outputs.version }}
+    steps:
+      - name: Check if publish is enabled
+        shell: bash
+        env:
+          PUBLISH_ENABLED: ${{ vars.ENABLE_RUNNER_ENV_PUBLISH || vars.ENABLE_HELM_PUBLISH }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH_ENABLED" != "true" ]; then
+            echo "::warning::Skipping - set ENABLE_RUNNER_ENV_PUBLISH=true or ENABLE_HELM_PUBLISH=true to enable Linux runner env publishing"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Select frameworks
+        id: select
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          REQUESTED_FRAMEWORKS: ${{ github.event.inputs.frameworks }}
+        run: |
+          set -euo pipefail
+
+          is_known_framework() {
+            case " $ALL_FRAMEWORKS " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          select_all() {
+            SELECTED_FRAMEWORKS=($ALL_FRAMEWORKS)
+          }
+
+          find_dice_serving_consumers() {
+            # Frameworks whose uv.lock currently depends on platform/dice-serving as a
+            # local path/directory (or editable) source. Scans the live lockfiles rather
+            # than the diff, since we need to know who depends on it today, not who
+            # changed.
+            grep -lE '(directory|editable) = "[^"]*dice-serving"' \
+              platform/trainers/*/uv.lock \
+              platform/trainers/*/envs/*/uv.lock \
+              platform/envs/*/uv.lock \
+              2>/dev/null | while IFS= read -r lockfile; do
+                dir="$(dirname "$lockfile")"
+                case "$dir" in
+                  platform/trainers/*/envs/*)
+                    printf '%s-%s\n' "$(basename "$(dirname "$(dirname "$dir")")")" "$(basename "$dir")" ;;
+                  platform/trainers/*)
+                    printf '%s\n' "$(basename "$dir")" ;;
+                  platform/envs/*)
+                    printf '%s\n' "$(basename "$dir")" ;;
+                esac
+              done | sort -u | while IFS= read -r framework; do
+                # Trainer projects can depend on dice-serving without having a
+                # runner-env bundle (for example, dice_v1). Only schedule
+                # frameworks this publisher actually knows how to build.
+                if is_known_framework "$framework"; then
+                  printf '%s\n' "$framework"
+                fi
+              done
+          }
+
+          normalize_requested() {
+            printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr ',;' '  ' | tr -s '[:space:]' ' ' | awk '{$1=$1; print}'
+          }
+
+          SELECTED_FRAMEWORKS=()
+          REQUESTED="$(normalize_requested "${REQUESTED_FRAMEWORKS:-changed}")"
+
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            echo "Scheduled build: selecting all runner env frameworks"
+            select_all
+          elif [ "$REQUESTED" = "all" ]; then
+            echo "Manual all build requested"
+            select_all
+          elif [ "$REQUESTED" != "changed" ]; then
+            for FRAMEWORK in $REQUESTED; do
+              if ! is_known_framework "$FRAMEWORK"; then
+                echo "::error::Unknown framework '$FRAMEWORK'. Known: $ALL_FRAMEWORKS"
+                exit 1
+              fi
+              SELECTED_FRAMEWORKS+=("$FRAMEWORK")
+            done
+          else
+            BASE="$BEFORE_SHA"
+            HEAD="$GITHUB_SHA"
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+              BASE="$(git rev-parse "$HEAD^" 2>/dev/null || git rev-list --max-parents=0 "$HEAD" | tail -n 1)"
+            fi
+
+            git diff --name-only "$BASE" "$HEAD" | tee changed-files.txt
+
+            if grep -Eq '^(\.github/workflows/linux-runner-env-publish\.yml|platform/scripts/(pack_runner_env\.sh|prepare_runner_env_legacy_asset\.py|prepare_dice_v1_converter_dir\.py|upload_runner_env_bundle\.py)|runner/scripts/pack-env\.sh)$' changed-files.txt; then
+              echo "Shared runner env tooling changed: selecting all frameworks"
+              select_all
+            else
+              mapfile -t SELECTED_FRAMEWORKS < <(
+                awk -F/ '
+                  $1 == "platform" && ($2 == "trainers" || $2 == "envs") && $3 != "" &&
+                  ($4 == "legacy-assets.json" || $4 == "pyproject.toml" || $4 == "uv.lock" || $NF ~ /^requirements.*\.(in|txt)$/) {
+                    print $3
+                  }
+                  $1 == "platform" && $2 == "trainers" && $3 != "" && $4 == "envs" && $5 != "" &&
+                  ($6 == "legacy-assets.json" || $6 == "pyproject.toml" || $6 == "uv.lock" || $NF ~ /^requirements.*\.(in|txt)$/) {
+                    print $3 "-" $5
+                  }
+                ' changed-files.txt | sort -u | while IFS= read -r fw; do
+                  if printf '%s\n' $ALL_FRAMEWORKS | grep -qx "$fw"; then
+                    echo "$fw"
+                  else
+                    printf '%s\n' $ALL_FRAMEWORKS | grep "^${fw}-" || true
+                  fi
+                done | sort -u
+              )
+
+              if grep -Eq '^platform/dice-serving/' changed-files.txt; then
+                # platform/dice-serving is a shared local-path dependency — rebuild only
+                # the frameworks that actually consume it, not every framework.
+                mapfile -t DICE_SERVING_CONSUMERS < <(find_dice_serving_consumers)
+                echo "dice-serving changed: adding its consumer frameworks (${DICE_SERVING_CONSUMERS[*]:-none})"
+                SELECTED_FRAMEWORKS+=("${DICE_SERVING_CONSUMERS[@]}")
+              fi
+
+              if grep -Eq '^platform/trainers/openmm/dice_v1_convert_to_mar/' changed-files.txt; then
+                # dice_v1_convert_to_mar is copied into the bundle only for the openmm-cu118/cu128
+                # variants, internal and -external (see pack_runner_env.sh prepare_legacy_dice_v1_converter_dir).
+                echo "dice_v1_convert_to_mar changed: adding its consumer frameworks (openmm-cu118 openmm-cu118-external openmm-cu128 openmm-cu128-external)"
+                SELECTED_FRAMEWORKS+=("openmm-cu118" "openmm-cu118-external" "openmm-cu128" "openmm-cu128-external")
+              fi
+            fi
+          fi
+
+          mapfile -t SELECTED_FRAMEWORKS < <(printf '%s\n' "${SELECTED_FRAMEWORKS[@]}" | awk 'NF' | sort -u)
+          for FRAMEWORK in "${SELECTED_FRAMEWORKS[@]}"; do
+            if ! is_known_framework "$FRAMEWORK"; then
+              echo "::error::Selected unknown framework '$FRAMEWORK'"
+              exit 1
+            fi
+          done
+
+          COMMIT_DATE="$(git show -s --format=%cs "$GITHUB_SHA" | tr '-' '.')"
+          SHORT_SHA="$(git rev-parse --short=8 "$GITHUB_SHA")"
+          VERSION="${COMMIT_DATE}-${SHORT_SHA}"
+          FRAMEWORKS_CSV="$(IFS=,; echo "${SELECTED_FRAMEWORKS[*]-}")"
+          FRAMEWORKS_JSON="$(printf '%s\n' "${SELECTED_FRAMEWORKS[@]}" | python3 -c 'import json, sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))')"
+
+          {
+            echo "frameworks<<EOF"
+            printf '%s\n' "${SELECTED_FRAMEWORKS[@]}"
+            echo "EOF"
+            echo "frameworks_json=$FRAMEWORKS_JSON"
+            echo "frameworks_csv=$FRAMEWORKS_CSV"
+            echo "count=${#SELECTED_FRAMEWORKS[@]}"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Selected frameworks: ${FRAMEWORKS_CSV:-none}"
+          echo "Version: $VERSION"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Linux runner env publish setup"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Trigger | ${{ github.event_name }} |"
+            echo "| Frameworks | \`${{ steps.select.outputs.frameworks_csv || 'none' }}\` |"
+            echo "| Version | \`${{ steps.select.outputs.version || 'n/a' }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    name: publish (${{ matrix.framework }})
+    runs-on: [code-linux, code-xlarge]
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: ${{ fromJson(needs.setup.outputs.frameworks_json) }}
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Configure Artifactory credentials for CUDA 12.8 environments
+        if: matrix.framework == 'vfm-v1-cu128' || matrix.framework == 'openmm-cu128' || matrix.framework == 'openmm-cu128-external'
+        shell: bash
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ARTIFACTORY_USERNAME" ] || [ -z "$JFROG_API_TOKEN" ]; then
+            echo "::error::Artifactory credentials are not configured"
+            exit 1
+          fi
+          NETRC_FILE="$RUNNER_TEMP/vfm-artifactory.netrc"
+          printf 'machine bart.sec.samsung.net login %s password %s\n' "$ARTIFACTORY_USERNAME" "$JFROG_API_TOKEN" > "$NETRC_FILE"
+          chmod 600 "$NETRC_FILE"
+          echo "NETRC=$NETRC_FILE" >> "$GITHUB_ENV"
+
+      - name: Validate storage configuration
+        shell: bash
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          DRY_RUN="${DRY_RUN:-false}"
+          MISSING=0
+          REQUIRED_NAMES=(S3_BUCKET RUNNER_ENV_STORAGE_PREFIX)
+          if [ "$DRY_RUN" != "true" ]; then
+            REQUIRED_NAMES+=(S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY)
+          fi
+          for NAME in "${REQUIRED_NAMES[@]}"; do
+            if [ -z "${!NAME:-}" ]; then
+              echo "::error::$NAME is not configured"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Publishing to s3://${S3_BUCKET}/${RUNNER_ENV_STORAGE_PREFIX}"
+
+      - name: Prepare pack and upload tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v bash
+          command -v python3
+          chmod +x platform/scripts/pack_runner_env.sh runner/scripts/pack-env.sh
+          if ! command -v uv >/dev/null 2>&1; then
+            python3 -m pip install --user --upgrade uv
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          command -v uv
+          python3 - <<'PY' || python3 -m pip install --user --upgrade boto3 botocore python-dotenv
+          import boto3
+          import botocore
+          PY
+
+      - name: Prime python-build-standalone cache
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CACHE_DIR="${RUNNER_TEMP}/python-build-standalone"
+          mkdir -p "$CACHE_DIR"
+          echo "PYTHON_BUILD_STANDALONE_CACHE=$CACHE_DIR" >> "$GITHUB_ENV"
+
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          import boto3
+          from botocore.config import Config
+
+          def env_bool(name: str) -> bool:
+              return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+          bucket = os.getenv("S3_BUCKET", "").strip()
+          prefix = os.getenv("RUNNER_ENV_PYTHON_TARBALL_PREFIX", "").strip().strip("/")
+          endpoint = os.getenv("S3_ENDPOINT", "").strip()
+          access_key = os.getenv("S3_ACCESS_KEY", "").strip()
+          secret_key = os.getenv("S3_SECRET_KEY", "").strip()
+          cache_dir = Path(os.getenv("RUNNER_TEMP", ".")) / "python-build-standalone"
+
+          if not all((bucket, prefix, endpoint, access_key, secret_key)):
+              print("[python-cache] storage config is incomplete; python-build-standalone will use its normal resolver", file=sys.stderr)
+              raise SystemExit(0)
+
+          client = boto3.client(
+              "s3",
+              endpoint_url=endpoint,
+              aws_access_key_id=access_key,
+              aws_secret_access_key=secret_key,
+              region_name=os.getenv("S3_REGION") or "us-east-1",
+              verify=not env_bool("RUNNER_ENV_NO_VERIFY_SSL"),
+              config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+          )
+
+          paginator = client.get_paginator("list_objects_v2")
+          downloaded = 0
+          for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/"):
+              for item in page.get("Contents", []):
+                  key = str(item.get("Key") or "")
+                  name = Path(key).name
+                  if not name.startswith("cpython-") or "-unknown-linux-gnu-install_only.tar." not in name:
+                      continue
+                  dest = cache_dir / name
+                  if dest.exists() and dest.stat().st_size == int(item.get("Size") or -1):
+                      print(f"[python-cache] cached {name}")
+                  else:
+                      print(f"[python-cache] downloading s3://{bucket}/{key}")
+                      client.download_file(bucket, key, str(dest))
+                  downloaded += 1
+
+          if downloaded == 0:
+              raise SystemExit(f"[python-cache] no python-build-standalone tarballs found under s3://{bucket}/{prefix}/")
+
+          print(f"[python-cache] prepared {downloaded} tarball(s) in {cache_dir}")
+          PY
+
+      - name: Pack and upload Linux runner env
+        shell: bash
+        env:
+          FRAMEWORK: ${{ matrix.framework }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          FORCE_UPLOAD: ${{ github.event.inputs.force_upload }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SKIP_VALIDATE: ${{ github.event.inputs.skip_validate }}
+          KEEP_PER_ALIAS: ${{ github.event.inputs.keep_per_alias }}
+          PYTHON_RELEASE: ${{ github.event.inputs.python_release }}
+          SINGLE_PUT: ${{ github.event.inputs.single_put }}
+          PAYLOAD_SIGNING: ${{ github.event.inputs.payload_signing }}
+        run: |
+          set -euo pipefail
+
+          FORCE_UPLOAD="${FORCE_UPLOAD:-true}"
+          DRY_RUN="${DRY_RUN:-false}"
+          SKIP_VALIDATE="${SKIP_VALIDATE:-false}"
+          KEEP_PER_ALIAS="${KEEP_PER_ALIAS:-5}"
+          PYTHON_RELEASE="${PYTHON_RELEASE:-latest}"
+          SINGLE_PUT="${SINGLE_PUT:-false}"
+          PAYLOAD_SIGNING="${PAYLOAD_SIGNING:-false}"
+          ENTRY_PREFIX="${RUNNER_ENV_STORAGE_PREFIX}/_entries/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          PACK_ARGS=(
+            --version "$VERSION"
+            --arch x86_64
+            --python-release "$PYTHON_RELEASE"
+          )
+          if [ "$SKIP_VALIDATE" = "true" ]; then
+            PACK_ARGS+=(--skip-validate)
+          fi
+
+          UPLOAD_ARGS=(
+            --bucket "$S3_BUCKET"
+            --prefix "$RUNNER_ENV_STORAGE_PREFIX"
+            --keep-per-alias "$KEEP_PER_ALIAS"
+            --description "Linux runner env built by GitHub Actions run ${GITHUB_RUN_ID} from ${GITHUB_SHA}"
+            --no-manifest
+            --entry-key "${ENTRY_PREFIX}/${FRAMEWORK}.json"
+          )
+          if [ "$FORCE_UPLOAD" = "true" ]; then
+            UPLOAD_ARGS+=(--force)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            UPLOAD_ARGS+=(--dry-run)
+          fi
+          if [ "$SINGLE_PUT" = "true" ]; then
+            UPLOAD_ARGS+=(--single-put)
+          fi
+          if [ "$PAYLOAD_SIGNING" = "true" ]; then
+            UPLOAD_ARGS+=(--payload-signing)
+          fi
+
+          BUNDLE="platform/dist/runner-envs/dice-env-linux-x86_64-${FRAMEWORK}.zip"
+
+          framework_to_pack_flags() {
+            case "$1" in
+              openmm-cu118)     printf -- '--framework openmm --cuda cu118' ;;
+              openmm-cu128)     printf -- '--framework openmm --cuda cu128' ;;
+              openmm-cu118-external) printf -- '--framework openmm --cuda cu118-external' ;;
+              openmm-cu128-external) printf -- '--framework openmm --cuda cu128-external' ;;
+              vfm-v1-cu128) printf -- '--framework vfm-v1 --cuda cu128' ;;
+              openmm-cpu-py38)  printf -- '--framework openmm --cpu --python 3.8' ;;
+              openmm-cpu-py39)  printf -- '--framework openmm --cpu --python 3.9' ;;
+              *)                printf -- '--framework %s' "$1" ;;
+            esac
+          }
+
+          echo "::group::Pack ${FRAMEWORK}"
+          IFS=' ' read -ra FRAMEWORK_PACK_ARGS <<< "$(framework_to_pack_flags "$FRAMEWORK")"
+          platform/scripts/pack_runner_env.sh "${FRAMEWORK_PACK_ARGS[@]}" "${PACK_ARGS[@]}"
+          echo "::endgroup::"
+
+          echo "::group::Upload ${FRAMEWORK}"
+          python3 platform/scripts/upload_runner_env_bundle.py --bundle "$BUNDLE" "${UPLOAD_ARGS[@]}"
+          echo "::endgroup::"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Linux runner env publish"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Trigger | ${{ github.event_name }} |"
+            echo "| Framework | \`${{ matrix.framework }}\` |"
+            echo "| Version | \`${{ needs.setup.outputs.version || 'n/a' }}\` |"
+            echo "| Bucket | \`${S3_BUCKET:-unset}\` |"
+            echo "| Prefix | \`${RUNNER_ENV_STORAGE_PREFIX:-unset}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-manifest:
+    needs: [setup, publish]
+    if: needs.setup.outputs.count != '0' && needs.publish.result == 'success' && (github.event.inputs.dry_run || 'false') != 'true'
+    runs-on: [code-linux, code-xlarge]
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Validate storage configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          MISSING=0
+          for NAME in S3_BUCKET RUNNER_ENV_STORAGE_PREFIX S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY; do
+            if [ -z "${!NAME:-}" ]; then
+              echo "::error::$NAME is not configured"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Prepare manifest upload tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v python3
+          python3 - <<'PY' || python3 -m pip install --user --upgrade boto3 botocore python-dotenv
+          import boto3
+          import botocore
+          PY
+
+      - name: Merge Linux runner env manifest
+        shell: bash
+        env:
+          KEEP_PER_ALIAS: ${{ github.event.inputs.keep_per_alias }}
+          PAYLOAD_SIGNING: ${{ github.event.inputs.payload_signing }}
+        run: |
+          set -euo pipefail
+
+          KEEP_PER_ALIAS="${KEEP_PER_ALIAS:-5}"
+          PAYLOAD_SIGNING="${PAYLOAD_SIGNING:-false}"
+          ENTRY_PREFIX="${RUNNER_ENV_STORAGE_PREFIX}/_entries/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          MERGE_ARGS=(
+            --bucket "$S3_BUCKET"
+            --prefix "$RUNNER_ENV_STORAGE_PREFIX"
+            --keep-per-alias "$KEEP_PER_ALIAS"
+            --merge-entry-prefix "$ENTRY_PREFIX"
+            --delete-entry-objects
+          )
+          if [ "$PAYLOAD_SIGNING" = "true" ]; then
+            MERGE_ARGS+=(--payload-signing)
+          fi
+
+          python3 platform/scripts/upload_runner_env_bundle.py "${MERGE_ARGS[@]}"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Linux runner env manifest"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Frameworks | \`${{ needs.setup.outputs.frameworks_csv || 'none' }}\` |"
+            echo "| Version | \`${{ needs.setup.outputs.version || 'n/a' }}\` |"
+            echo "| Bucket | \`${S3_BUCKET:-unset}\` |"
+            echo "| Prefix | \`${RUNNER_ENV_STORAGE_PREFIX:-unset}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

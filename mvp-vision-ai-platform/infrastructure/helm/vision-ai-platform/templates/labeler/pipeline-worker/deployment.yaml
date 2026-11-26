@@ -1,0 +1,93 @@
+{{- if and .Values.labeler.enabled .Values.labeler.messaging.enabled .Values.labeler.pipelineWorker.enabled }}
+{{- $imageRepository := default .Values.labeler.backend.image.repository .Values.labeler.pipelineWorker.image.repository }}
+{{- $imageTag := default .Values.labeler.backend.image.tag .Values.labeler.pipelineWorker.image.tag }}
+{{- $backendEnv := default (dict) .Values.labeler.backend.env }}
+{{- $autoEnv := include "vision-ai.autoLabeling.labelerEnv" (dict "root" . "env" $backendEnv) | fromYaml }}
+{{- $workerEnv := default (dict) .Values.labeler.pipelineWorker.env }}
+{{- $env := mergeOverwrite (deepCopy $autoEnv) $workerEnv }}
+{{- $env = include "vision-ai.redis.applicationEnv" (dict "root" . "env" $env "database" "labeler") | fromYaml }}
+{{- $cacheWarmupUrl := index $env "PLATFORM_DATASET_CACHE_WARMUP_URL" | default (include "vision-ai.datasetCache.warmupUrl" .) }}
+{{- if $cacheWarmupUrl }}{{- $_ := set $env "PLATFORM_DATASET_CACHE_WARMUP_URL" $cacheWarmupUrl }}{{- end }}
+{{- $env = include "vision-ai.labeler.messagingEnv" (dict "root" . "env" $env) | fromYaml }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.labeler.fullname" . }}-pipeline-worker
+  labels:
+    {{- include "vision-ai.labeler.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pipeline-worker
+spec:
+  strategy:
+    type: RollingUpdate
+  replicas: {{ .Values.labeler.pipelineWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: pipeline-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "vision-ai.labeler.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: pipeline-worker
+    spec:
+      terminationGracePeriodSeconds: 90
+      {{- with .Values.labeler.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.labeler.pipelineWorker.securityContext }}
+      securityContext:
+        {{- toYaml .Values.labeler.pipelineWorker.securityContext | nindent 8 }}
+      {{- else }}
+      {{- with .Values.labeler.backend.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      {{- if eq (include "vision-ai.autoLabeling.enabled" .) "true" }}
+      initContainers:
+        - name: inference-schema
+          image: "{{ $imageRepository }}:{{ $imageTag }}"
+          command: ["uv", "run", "--no-project", "python", "-m", "app.inference.schema", "wait"]
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+      {{- end }}
+      containers:
+        - name: pipeline-worker
+          image: "{{ $imageRepository }}:{{ $imageTag }}"
+          {{- with .Values.labeler.pipelineWorker.image.pullPolicy }}
+          imagePullPolicy: {{ . }}
+          {{- end }}
+          {{- with .Values.labeler.pipelineWorker.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.labeler.pipelineWorker.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            {{- range $key, $value := $env }}
+            {{- include "vision-ai.env.entry" (dict "name" $key "value" $value) | nindent 12 }}
+            {{- end }}
+          {{- with .Values.labeler.pipelineWorker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.labeler.pipelineWorker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.pipelineWorker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.labeler.pipelineWorker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

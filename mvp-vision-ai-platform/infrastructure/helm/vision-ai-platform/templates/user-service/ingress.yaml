@@ -1,0 +1,46 @@
+{{- if and .Values.userService.enabled .Values.userService.ingress.enabled -}}
+# Cluster-internal Ingress only. Public routing to /user still requires an
+# out-of-repo change to the Istio `dice-vs` VirtualService — see
+# docs/todo/reference/USER_SERVICE_DESIGN.md "알려진 위험". Disabled by
+# default (matches dice-bot, which has no Ingress at all and is reached only
+# via in-cluster DNS / this chart's Service).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "vision-ai.userService.fullname" . }}
+  labels:
+    {{- include "vision-ai.userService.labels" . | nindent 4 }}
+  {{- with .Values.userService.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.userService.ingress.className }}
+  ingressClassName: {{ .Values.userService.ingress.className }}
+  {{- end }}
+  {{- if .Values.userService.ingress.tls }}
+  tls:
+    {{- range .Values.userService.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.userService.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "vision-ai.userService.fullname" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

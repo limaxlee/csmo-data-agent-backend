@@ -1,0 +1,143 @@
+{{- $name := .Values.namePrefix -}}
+{{- $ns := .Release.Namespace -}}
+{{- $secret := .Values.secret -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-backend
+  labels:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  strategy:
+    type: {{ .Values.backend.strategy }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: data-agent
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: data-agent
+        app.kubernetes.io/component: backend
+    spec:
+      # No automatic <SERVICE>_PORT variables: they can collide with the
+      # application's own setting names.
+      enableServiceLinks: false
+      imagePullSecrets:
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image }}:{{ required "backend.tag is required" .Values.backend.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.port }}
+          env:
+            - name: SERVER_PORT
+              value: {{ .Values.backend.port | quote }}
+            # The two MCP servers of this same release.
+            - name: MONGODB_MCP_HOST
+              value: {{ $name }}-mongodb-mcp.{{ $ns }}.svc.cluster.local
+            - name: MONGODB_MCP_PORT
+              value: {{ .Values.mongodbMcp.port | quote }}
+            - name: MILVUS_MCP_HOST
+              value: {{ $name }}-milvus-mcp.{{ $ns }}.svc.cluster.local
+            - name: MILVUS_MCP_PORT
+              value: {{ .Values.milvusMcp.port | quote }}
+            # The Postgres of this same release.
+            - name: POSTGRESQL_DB_HOST
+              value: {{ $name }}-postgres.{{ $ns }}.svc.cluster.local
+            - name: POSTGRESQL_DB_PORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: POSTGRESQL_DB_NAME
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRESQL_DB_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRESQL_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.postgresPassword }}
+            {{- range $k, $v := .Values.backend.env }}
+            {{- if not (empty $v) }}
+            - name: {{ $k }}
+              value: {{ $v | toString | quote }}
+            {{- end }}
+            {{- end }}
+            - name: AUTH_SERVICE_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.serviceJwtSecret }}
+            - name: OBJECT_STORAGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.s3AccessKey }}
+            - name: OBJECT_STORAGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.s3SecretKey }}
+            - name: ROOT_MODEL_OPENAPI_CLIENT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.rootModelClientKey }}
+            - name: ROOT_MODEL_OPENAPI_PASS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.rootModelPassKey }}
+            - name: TITLE_MODEL_OPENAPI_CLIENT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.titleModelClientKey }}
+            - name: TITLE_MODEL_OPENAPI_PASS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret.name }}
+                  key: {{ $secret.keys.titleModelPassKey }}
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          # "Is the port open" is the right question here: the backend opens
+          # its port only after it has reached the database and created its
+          # tables. GET /health is not used, because it asks the database and
+          # the object storage on every call and writes log lines each time.
+          # If Postgres is not up yet, the backend stops and is started again
+          # until it is. A few restarts right after a first sync are normal.
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-backend
+  labels:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: backend
+spec:
+  selector:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: backend
+  ports:
+    - name: http
+      port: {{ .Values.backend.port }}
+      targetPort: http

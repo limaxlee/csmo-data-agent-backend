@@ -1,0 +1,175 @@
+# Default values for the data-agent chart.
+#
+# Environment values live in deploy/argocd/environments/<env>/data-agent.yaml
+# in this repository and are referenced by the Argo CD Applications
+# data-agent-stage and data-agent-prod. A value written there replaces the
+# value written here.
+
+namePrefix: data-agent
+
+imagePullPolicy: IfNotPresent
+# Lets the cluster download images from dice-docker-local.bart.sec.samsung.net.
+imagePullSecrets:
+  - regcred
+
+# Kubernetes Secret that holds the keys and passwords. It is created by hand
+# in the namespace, it is never in git, and it must exist before the first
+# sync. The key names on the right are the names inside that Secret.
+secret:
+  name: data-agent-secrets
+  keys:
+    serviceJwtSecret: service-jwt-secret
+    s3AccessKey: s3-access-key
+    s3SecretKey: s3-secret-key
+    rootModelClientKey: root-model-client-key
+    rootModelPassKey: root-model-pass-key
+    titleModelClientKey: title-model-client-key
+    titleModelPassKey: title-model-pass-key
+    postgresPassword: postgres-password
+
+# The data agent's own Postgres. One per environment.
+postgres:
+  image: docker-remote.bart.sec.samsung.net/postgres
+  # The defect agent runs this same image on the same kind of disk in this
+  # cluster.
+  tag: "16-alpine"
+  port: 5432
+  # Name of the database, and of the user the backend connects as. Both are
+  # created, with the password from the Secret, when Postgres starts on an
+  # empty disk. Changing these lines later does not change an existing
+  # database.
+  database: data_agent
+  user: postgres
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # The disk that holds the data. Argo CD never deletes it.
+  persistence:
+    storageClass: nfs-csi
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+
+backend:
+  image: dice-docker-local.bart.sec.samsung.net/cosmo-data-agent-backend
+  # REQUIRED: immutable tag (date-commit). Never use a moving tag such as "latest".
+  # The image has to be built from code that knows the database password
+  # setting (POSTGRESQL_DB_PASSWORD in common/config.py, added 2026-11-26).
+  tag: ""
+  # Keep one replica and Recreate. When the backend starts it marks every
+  # session as "not running" (data_agent/infra/session_lock.py), so a second
+  # copy starting next to a working one would release the first one's locks.
+  replicas: 1
+  strategy: Recreate
+  port: 18080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  # Plain settings. Each line becomes an environment variable of the backend
+  # container (the names are the ones in common/config.py). Write every value
+  # in quotes. An empty value is left out.
+  #
+  # Do not add these here, the chart sets them itself: SERVER_PORT,
+  # MONGODB_MCP_HOST, MONGODB_MCP_PORT, MILVUS_MCP_HOST, MILVUS_MCP_PORT,
+  # every POSTGRESQL_DB_... value (they point at the Postgres of this same
+  # release), and the values that come from the Secret.
+  env:
+    OBJECT_STORAGE_BUCKET: ""
+    OBJECT_STORAGE_ENDPOINT: ""
+    ROOT_MODEL_OPENAPI_MODEL: ""
+    ROOT_MODEL_OPENAPI_ENDPOINT: ""
+    ROOT_MODEL_OPENAPI_MODEL_ID: ""
+    TITLE_MODEL_OPENAPI_MODEL: ""
+    TITLE_MODEL_OPENAPI_ENDPOINT: ""
+    TITLE_MODEL_OPENAPI_MODEL_ID: ""
+    AUTH_SERVICE_JWT_ISSUER: "web-auth"
+    AUTH_SERVICE_JWT_AUDIENCE: "dice-backend"
+    # Lets the backend record the visitor's own address in the access log.
+    # 127.0.0.6 is the address the Istio sidecar hands requests over from.
+    FORWARDED_ALLOW_IPS: "127.0.0.6"
+
+frontend:
+  image: dice-docker-local.bart.sec.samsung.net/cosmo-data-agent-frontend
+  # REQUIRED: immutable tag.
+  tag: ""
+  replicas: 1
+  port: 13080
+  # The page the health check asks for. It starts with the base path the image
+  # was built with (NEXT_PUBLIC_BASE_PATH, /data-agent by default).
+  healthPath: /data-agent/chat/new
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+mongodbMcp:
+  image: dice-docker-local.bart.sec.samsung.net/cosmo-mongodb-mcp-server
+  # REQUIRED: immutable tag.
+  tag: ""
+  # One replica: the backend keeps an open MCP session with this one process.
+  replicas: 1
+  port: 10420
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Plain settings (names from the MCP server's common/config.py).
+  # SERVER_PORT is set by the chart.
+  env:
+    MONGODB_HOST: ""
+    MONGODB_PORT: "27017"
+    MONGODB_DB_NAME: ""
+
+milvusMcp:
+  image: dice-docker-local.bart.sec.samsung.net/cosmo-milvus-mcp-server
+  # REQUIRED: immutable tag.
+  tag: ""
+  # One replica: the backend keeps an open MCP session with this one process.
+  replicas: 1
+  port: 10422
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  # Plain settings (names from the MCP server's common/config.py).
+  # SERVER_PORT and the two object storage keys are set by the chart.
+  env:
+    MILVUS_HOST: ""
+    MILVUS_PORT: "19530"
+    MILVUS_DB_NAME: ""
+    FEATURE_EXTRACTOR_HOST: ""
+    FEATURE_EXTRACTOR_PORT: ""
+    OBJECT_STORAGE_BUCKET: ""
+    OBJECT_STORAGE_ENDPOINT: ""
+
+virtualService:
+  enabled: true
+  name: data-agent
+  hosts: []
+  # platform-gateway (istio-system) serves *.gtrai.sec.samsung.net.
+  gateways:
+    - istio-system/platform-gateway
+  # Must be equal to the base path the frontend image was built with.
+  path: /data-agent
+  # The DICE login cookie is only sent over https.
+  redirectHttpToHttps: true
+  # The data agent uses no cookies. Removing them keeps the DICE login cookie
+  # out of the data agent containers and their logs.
+  removeCookies: true

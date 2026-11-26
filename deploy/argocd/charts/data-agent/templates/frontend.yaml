@@ -1,0 +1,84 @@
+{{- $name := .Values.namePrefix -}}
+{{- $ns := .Release.Namespace -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-frontend
+  labels:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: data-agent
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: data-agent
+        app.kubernetes.io/component: frontend
+    spec:
+      enableServiceLinks: false
+      imagePullSecrets:
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image }}:{{ required "frontend.tag is required" .Values.frontend.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.frontend.port }}
+          env:
+            # Next.js listens on the address in HOSTNAME. Kubernetes can set
+            # HOSTNAME to the pod's name, so it is fixed here.
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: PORT
+              value: {{ .Values.frontend.port | quote }}
+            # The backend of this same release. Read by the frontend server
+            # only, never by the browser.
+            - name: BACKEND_ORIGIN
+              value: http://{{ $name }}-backend.{{ $ns }}.svc.cluster.local:{{ .Values.backend.port }}
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          # Asks for a real page. An image built without the right base path
+          # answers 404 here and never becomes ready.
+          startupProbe:
+            httpGet:
+              path: {{ .Values.frontend.healthPath }}
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.frontend.healthPath }}
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.frontend.healthPath }}
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-frontend
+  labels:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: frontend
+spec:
+  selector:
+    app.kubernetes.io/name: data-agent
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: http
+      port: {{ .Values.frontend.port }}
+      targetPort: http

@@ -1,0 +1,64 @@
+# Production values for the data-agent chart.
+# Referenced by the data-agent-prod Argo CD Application.
+# Address: https://dice.gtrai.sec.samsung.net/data-agent   Namespace: dice
+#
+# No passwords or keys in this file. They are in the Kubernetes Secret named
+# below, which is created by hand in dice.
+#
+# The database is not set here. Production gets its own Postgres from the
+# chart (pod data-agent-postgres in dice), and the chart points the backend
+# at it. It starts empty. The Postgres on 10.240.35.180 is not used.
+
+namePrefix: data-agent
+
+secret:
+  # Must exist in dice before the first sync (NOT in git).
+  name: data-agent-prod-secrets
+
+backend:
+  # Copy the four tags from the stage file (../stage/data-agent.yaml), and
+  # only after that version passed the stage test.
+  tag: ""
+  env:
+    OBJECT_STORAGE_BUCKET: "cosmo-storage"
+    OBJECT_STORAGE_ENDPOINT: "https://s3.ap-northeast-2.samsungspc.com"
+    ROOT_MODEL_OPENAPI_MODEL: "openai/qwen/qwen3.8-flash-next"
+    ROOT_MODEL_OPENAPI_ENDPOINT: "https://mlp-service.n10.sr-cloud.com/service-gtr-ai-vision-dice-agent/v1"
+    ROOT_MODEL_OPENAPI_MODEL_ID: "605"
+    TITLE_MODEL_OPENAPI_MODEL: "openai/qwen/qwen3.8-flash-next"
+    TITLE_MODEL_OPENAPI_ENDPOINT: "https://mlp-service.n10.sr-cloud.com/service-gtr-ai-vision-dice-agent/v1"
+    TITLE_MODEL_OPENAPI_MODEL_ID: "81"
+
+frontend:
+  tag: ""
+
+mongodbMcp:
+  tag: ""
+  env:
+    MONGODB_HOST: "dev.gtrai.sec.samsung.net"
+    MONGODB_PORT: "27017"
+    MONGODB_DB_NAME: "cosmoData"
+
+milvusMcp:
+  tag: ""
+  env:
+    MILVUS_HOST: "10.240.35.180"
+    MILVUS_PORT: "19530"
+    MILVUS_DB_NAME: "cosmoData"
+    FEATURE_EXTRACTOR_HOST: "10.240.28.235"
+    FEATURE_EXTRACTOR_PORT: "24502"
+    OBJECT_STORAGE_BUCKET: "cosmo-storage"
+    OBJECT_STORAGE_ENDPOINT: "https://s3.ap-northeast-2.samsungspc.com"
+
+virtualService:
+  # false: the containers run, but nobody is sent to them. People keep
+  # reaching the server 10.240.35.180 through the rule that was made by hand.
+  # true: the switch. This rule replaces the hand-made one, which has the
+  # same name on purpose, so the change happens in one step.
+  enabled: false
+  name: data-agent
+  hosts:
+    - dice.gtrai.sec.samsung.net
+  gateways:
+    - istio-system/platform-gateway
+  redirectHttpToHttps: true

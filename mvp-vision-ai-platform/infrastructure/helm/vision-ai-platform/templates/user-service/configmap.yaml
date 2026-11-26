@@ -1,0 +1,46 @@
+{{- if .Values.userService.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vision-ai.userService.fullname" . }}-config
+  labels:
+    {{- include "vision-ai.userService.labels" . | nindent 4 }}
+data:
+  API_V1_PREFIX: {{ .Values.userService.config.apiV1Prefix | quote }}
+  BACKEND_PORT: {{ .Values.userService.config.backendPort | quote }}
+  CORS_ORIGINS: {{ .Values.userService.config.corsOrigins | quote }}
+
+  # users DB — must point at the same physical DB as platform.backend's
+  # USER_DATABASE_URL during the Phase 1 migration window (see
+  # docs/todo/reference/USER_SERVICE_DESIGN.md). No auto-discovery: unlike
+  # dice-bot's BOT_BACKEND_URL, there's no other service in this chart whose
+  # fullname this could be derived from, so it must be set explicitly.
+  USER_DATABASE_URL: {{ .Values.userService.config.userDatabaseUrl | quote }}
+
+  # Must be byte-identical to web-auth / platform.backend / labeler's
+  # SERVICE_JWT_SECRET, or cross-service auth breaks silently.
+  # When userService.secretEnv carries a SERVICE_JWT_SECRET entry, the
+  # Deployment env already supplies it (env wins over this envFrom ConfigMap),
+  # so omit the plaintext key instead of rendering a value that only shadows
+  # the Secret-backed one.
+  {{- if kindIs "map" .Values.userService.config.serviceJwtSecret }}
+  {{- fail "userService.config.serviceJwtSecret must be a scalar; put a SERVICE_JWT_SECRET entry under userService.secretEnv for a Secret-backed value" }}
+  {{- end }}
+  {{- $jwtRefFromSecretEnv := false }}
+  {{- range .Values.userService.secretEnv }}{{ if eq .name "SERVICE_JWT_SECRET" }}{{ $jwtRefFromSecretEnv = true }}{{ end }}{{ end }}
+  {{- if not $jwtRefFromSecretEnv }}
+  SERVICE_JWT_SECRET: {{ .Values.userService.config.serviceJwtSecret | quote }}
+  {{- end }}
+  SERVICE_JWT_ALGORITHM: {{ .Values.userService.config.serviceJwtAlgorithm | quote }}
+
+  {{- $botBackendUrl := .Values.userService.config.botBackendUrl }}
+  {{- if and (not $botBackendUrl) .Values.diceBot.enabled }}
+  {{- $botBackendUrl = printf "http://%s:8000/api/v1/dice-bot" (include "vision-ai.diceBot.fullname" .) }}
+  {{- end }}
+  BOT_BACKEND_URL: {{ $botBackendUrl | quote }}
+  USER_SERVICE_ADMIN_NOTIFY_TARGET: {{ .Values.userService.config.adminNotifyTarget | quote }}
+
+  {{- range $key, $value := .Values.userService.config.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}

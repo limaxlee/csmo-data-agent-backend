@@ -1,0 +1,506 @@
+name: Publish Windows Runner Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/windows-runner-release-publish.yml'
+      - 'runner/scripts/setup-windows-action-tools.ps1'
+      - 'runner/scripts/cleanup-windows-action-tools.ps1'
+      - 'runner/scripts/build.ps1'
+      - 'runner/.cargo/config.toml'
+      - 'runner/scripts/build.rs'
+      - 'runner/scripts/build_support.rs'
+      - 'runner/scripts/windows-version.ps1'
+      - 'runner/scripts/tests/**'
+      - 'runner/scripts/release-windows-platform.ps1'
+      - 'runner/packaging/**'
+      - 'runner/Cargo.toml'
+      - 'runner/Cargo.lock'
+      - 'runner/internal-release-notes.json'
+      - 'runner/crates/**'
+      - 'runner/clients/csharp/**'
+      - 'runner/frontend/**'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build release package and print actions without writing to S3'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      no_verify_ssl:
+        description: 'Disable SSL certificate verification for runner release storage operations'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      variant:
+        description: 'Which variant(s) to build: both (default), internal, or partner'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - 'both'
+          - 'internal'
+          - 'partner'
+
+permissions:
+  contents: read
+
+# Jobs are created before the matrix is expanded, so the concurrency group key
+# must not reference the matrix context: `...-${{ matrix.variant }}` keeps the
+# file valid but stops the matrix jobs from ever being created.
+concurrency:
+  group: windows-runner-release-publish
+  cancel-in-progress: false
+
+env:
+  # Corporate Windows runners cannot reach certificate revocation endpoints.
+  # Apply the existing build setting to every Cargo and NuGet invocation.
+  CARGO_HTTP_CHECK_REVOKE: 'false'
+  NUGET_CERT_REVOCATION_MODE: 'offline'
+  S3_BUCKET: ${{ vars.S3_BUCKET || secrets.S3_BUCKET }}
+  S3_ENDPOINT: ${{ vars.S3_ENDPOINT || secrets.S3_ENDPOINT }}
+  RUNNER_RELEASE_NO_VERIFY_SSL: ${{ vars.RUNNER_RELEASE_NO_VERIFY_SSL || 'false' }}
+  S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY || vars.S3_ACCESS_KEY }}
+  S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY || vars.S3_SECRET_KEY }}
+  S3_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY || vars.S3_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY || vars.S3_SECRET_KEY }}
+  AWS_DEFAULT_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+  AWS_EC2_METADATA_DISABLED: 'true'
+  AWS_CLI_AUTO_PROMPT: 'off'
+  AWS_PAGER: ''
+  # Preserve S3-compatible storage behavior when moving from CLI v1 to v2.
+  AWS_REQUEST_CHECKSUM_CALCULATION: 'when_required'
+  AWS_RESPONSE_CHECKSUM_VALIDATION: 'when_required'
+
+jobs:
+  # Job-level `if` cannot see the matrix context, so we cannot skip matrix
+  # legs there. Build the requested legs as a matrix JSON here instead —
+  # unrequested variants simply never materialize as matrix jobs.
+  plan:
+    runs-on: [code-windows]
+    outputs:
+      variants_json: ${{ steps.plan.outputs.variants_json }}
+    steps:
+      - name: Plan variant matrix
+        id: plan
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $variant = "${{ github.event.inputs.variant }}"
+          if ([string]::IsNullOrWhiteSpace($variant)) { $variant = "both" }
+          $variants = @()
+          if ($variant -eq "both" -or $variant -eq "internal") { $variants += "internal" }
+          if ($variant -eq "both" -or $variant -eq "partner") { $variants += "partner" }
+          if ($variants.Count -eq 0) { throw "Unknown variant '$variant'" }
+          $json = ConvertTo-Json -Compress -InputObject @($variants)
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "variants_json=$json"
+          Write-Host "Matrix: $json"
+
+  publish:
+    needs: plan
+    name: publish (${{ matrix.variant }})
+    runs-on: [code-windows]
+    # matrix는 job 컨텍스에서만 사용 가능 → workflow top-level이 아니라 여기서 평가
+    strategy:
+      fail-fast: false
+      # One shared Windows runner and one shared release store: keep the legs
+      # sequential so the uploads never overlap.
+      max-parallel: 1
+      matrix:
+        variant: ${{ fromJSON(needs.plan.outputs.variants_json) }}
+    steps:
+      - name: Check if publish is enabled
+        shell: powershell
+        env:
+          PUBLISH_ENABLED: ${{ vars.ENABLE_WINDOWS_RUNNER_PUBLISH || vars.ENABLE_RUNNER_RELEASE_PUBLISH || vars.ENABLE_HELM_PUBLISH }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:PUBLISH_ENABLED -ne "true") {
+            Write-Warning "Skipping - set ENABLE_WINDOWS_RUNNER_PUBLISH=true, ENABLE_RUNNER_RELEASE_PUBLISH=true, or ENABLE_HELM_PUBLISH=true to enable Windows runner release publishing"
+            exit 1
+          }
+
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Resolve storage prefix
+        shell: powershell
+        run: |
+          $storagePrefix = if ("${{ matrix.variant }}" -eq "partner") {
+            "${{ vars.RUNNER_RELEASE_WINDOWS_PARTNER_STORAGE_PREFIX || 'runner-releases/windows-partner' }}"
+          } else {
+            "${{ vars.RUNNER_RELEASE_WINDOWS_STORAGE_PREFIX || vars.RUNNER_RELEASE_STORAGE_PREFIX || 'runner-releases/windows' }}"
+          }
+          $encoding = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "RUNNER_RELEASE_STORAGE_PREFIX=$storagePrefix`n", $encoding)
+          Write-Host "Resolved RUNNER_RELEASE_STORAGE_PREFIX: $storagePrefix"
+
+      - name: Select Windows runner release version
+        id: select
+        shell: powershell
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          . .\runner\scripts\windows-version.ps1
+          $windowsVersion = Get-RunnerWindowsVersion -RunNumber $env:GITHUB_RUN_NUMBER -RunAttempt $env:GITHUB_RUN_ATTEMPT
+          $cargoTomlPath = Join-Path $env:GITHUB_WORKSPACE "runner/Cargo.toml"
+          $m = (Select-String -Path $cargoTomlPath -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches
+          $cargoVersion = if ($m -and $m.Count -gt 0) { $m[0].Groups[1].Value } else { "0.0.0" }
+          $commitDate = (git show -s --format=%cs $env:GITHUB_SHA).Trim() -replace "-", "."
+          $releaseDate = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd")
+          $shortSha = (git rev-parse --short=8 $env:GITHUB_SHA).Trim()
+          $version = "$cargoVersion-$commitDate-$shortSha-r$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "windows_version=$windowsVersion"
+          Add-Content -Path $env:GITHUB_ENV -Value "DICE_WINDOWS_VERSION=$windowsVersion"
+          Add-Content -Path $env:GITHUB_ENV -Value "DICE_RELEASE_DATE=$releaseDate"
+          Add-Content -Path $env:GITHUB_ENV -Value "VERSION=$version"
+          Write-Host "Version: $version; MSI/FileVersion: $windowsVersion"
+
+      - name: Prepare internal release notes
+        if: matrix.variant == 'internal'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $notesPath = Join-Path $env:GITHUB_WORKSPACE "runner/internal-release-notes.json"
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          $raw = [System.IO.File]::ReadAllText($notesPath, $utf8)
+          $parsed = $raw | ConvertFrom-Json
+          $notes = New-Object System.Collections.Generic.List[object]
+          foreach ($note in $parsed) {
+            if ($null -eq $note) { continue }
+            if ([string]::IsNullOrWhiteSpace($note.ko) -or [string]::IsNullOrWhiteSpace($note.en)) {
+              throw "Every internal release note must contain non-empty ko and en text"
+            }
+            $notes.Add([PSCustomObject]@{ ko = [string]$note.ko; en = [string]$note.en })
+          }
+          $json = if ($notes.Count -eq 0) {
+            "[]"
+          } else {
+            ConvertTo-Json -Compress -Depth 5 -InputObject $notes.ToArray()
+          }
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "DICE_INTERNAL_RELEASE_NOTES_JSON=$json`n", $utf8)
+          Write-Host "Prepared $($notes.Count) curated internal release note(s); an empty list skips the startup notice"
+
+      - name: Test Windows installer version policy
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\runner\scripts\tests\windows-version.tests.ps1
+
+      - name: Validate storage configuration
+        shell: powershell
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dryRun = if ([string]::IsNullOrWhiteSpace($env:DRY_RUN)) { "false" } else { $env:DRY_RUN }
+          $missing = New-Object System.Collections.Generic.List[string]
+
+          foreach ($name in @("S3_BUCKET")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              $missing.Add($name)
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_RELEASE_STORAGE_PREFIX)) {
+            $missing.Add("RUNNER_RELEASE_STORAGE_PREFIX")
+          }
+          if ($dryRun -ne "true") {
+            foreach ($name in @("S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")) {
+              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                $missing.Add($name)
+              }
+            }
+          }
+
+          if ($missing.Count -gt 0) {
+            foreach ($name in ($missing | Sort-Object -Unique)) {
+              Write-Error "$name is not configured"
+            }
+            exit 1
+          }
+
+          Write-Host "Publishing Windows runner release to s3://$env:S3_BUCKET/$env:RUNNER_RELEASE_STORAGE_PREFIX"
+
+      - name: Setup Node.js
+        uses: code-actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Setup .NET SDK for WiX and C# SDK
+        uses: code-actions/setup-dotnet@v4
+        with:
+          # WiX 5.0.2 targets net6.0 with rollForward=Major; C# SDK targets netstandard2.0;net8.0.
+          dotnet-version: '8.0.x'
+
+      - name: Install isolated Windows release tools
+        shell: powershell
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $needsAwsCli = $env:DRY_RUN -ne "true" -or "${{ matrix.variant }}" -eq "partner"
+          & .\runner\scripts\setup-windows-action-tools.ps1 -SetupMsvc -InstallRust -InstallPnpm -InstallWix -InstallAwsCli:$needsAwsCli
+          if ($LASTEXITCODE -ne 0) { throw "Windows release tool setup failed" }
+          foreach ($command in @('node', 'pnpm', 'cargo', 'rustup', 'wix')) {
+            $resolved = Get-Command $command -ErrorAction Stop
+            Write-Host "$command -> $($resolved.Source)"
+          }
+          if ($needsAwsCli) { aws --version }
+
+      - name: Test native worker IPC lifecycle on Windows
+        shell: powershell
+        working-directory: runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --locked -p onnx-ipc --features test-fixtures
+          if ($LASTEXITCODE -ne 0) { throw 'Native worker IPC lifecycle tests failed' }
+
+      - name: Test Windows MSI C# SDK staging and fragment rules
+        shell: powershell
+        working-directory: runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'target\installer-tools' | Out-Null
+          rustc --edition 2021 --test 'packaging\windows\installer.rs' -o 'target\installer-tools\dice-installer-tests.exe'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not compile installer.rs unit tests' }
+          & '.\target\installer-tools\dice-installer-tests.exe'
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer staging tests failed' }
+
+      - name: Test Runner Win32 SHM broker and C# SDK parity on Windows
+        shell: powershell
+        working-directory: runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # ts-http embeds frontend/dist via include_dir! at compile time; the real
+          # console bundle is built later by release-windows-platform.ps1.
+          $createdStubDist = -not (Test-Path -LiteralPath 'frontend\dist' -PathType Container)
+          if ($createdStubDist) {
+            New-Item -ItemType Directory -Force -Path 'frontend\dist' | Out-Null
+          }
+          try {
+            cargo test --locked -p ts-http --test shm_v3 -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw 'Win32 SHM broker (/v3/shm/arenas*) tests failed' }
+            cargo build --locked -p ts-http --example shm_parity_server
+            if ($LASTEXITCODE -ne 0) { throw 'Could not build shm_parity_server on Windows' }
+            dotnet test 'clients\csharp\Dice.Client.sln' -c Release
+            if ($LASTEXITCODE -ne 0) { throw 'C# SDK unit and Win32 SHM parity tests failed' }
+          } finally {
+            if ($createdStubDist -and -not (Test-Path -LiteralPath 'frontend\dist\index.html' -PathType Leaf)) {
+              Remove-Item -Recurse -Force -LiteralPath 'frontend\dist'
+            }
+          }
+
+      - name: Inject HASP DLL (partner builds only)
+        if: matrix.variant == 'partner'
+        shell: powershell
+        env:
+          # Optional custom S3 key for the HASP DLL; defaults to runner-releases/build-secrets/hasp_windows_x86_64.dll
+          HASP_DLL_S3_KEY: ${{ vars.HASP_DLL_S3_KEY || 'runner-releases/build-secrets/hasp_windows_x86_64.dll' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dst = Join-Path $env:GITHUB_WORKSPACE "runner\assets\hasp_windows_x86_64.dll"
+
+          # 1. Use existing DLL if already present in the workspace
+          if (Test-Path $dst -PathType Leaf) {
+            Write-Host "HASP DLL is already present in workspace: $dst ($((Get-Item $dst).Length) bytes)"
+            exit 0
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "HASP_DLL_CREATED_BY_WORKFLOW=true"
+
+          # 2. Try copying from local build machine cache
+          $src = "C:\dice-build-secrets\hasp_windows_x86_64.dll"
+          if (Test-Path $src -PathType Leaf) {
+            Write-Host "Found local HASP DLL cache at $src. Copying to workspace..."
+            New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+            Copy-Item $src $dst
+            Write-Host "HASP DLL copied: $dst ($((Get-Item $dst).Length) bytes)"
+            exit 0
+          }
+
+          # 3. Fall back to downloading from S3 using already configured S3 credentials
+          Write-Host "Local HASP DLL not found. Attempting download from S3..."
+          $bucket = $env:S3_BUCKET
+          if ([string]::IsNullOrWhiteSpace($bucket)) {
+            throw "Neither local HASP DLL ($src) nor S3_BUCKET is configured. Cannot proceed with partner build."
+          }
+
+          $key = $env:HASP_DLL_S3_KEY
+          $s3Path = "s3://$bucket/$key"
+          Write-Host "S3 Source Path: $s3Path"
+
+          $awsArgs = @("s3", "cp", $s3Path, $dst)
+          if (-not [string]::IsNullOrWhiteSpace($env:S3_ENDPOINT)) {
+            $awsArgs += @("--endpoint-url", $env:S3_ENDPOINT)
+          }
+          if ($env:RUNNER_RELEASE_NO_VERIFY_SSL -eq "true" -or $env:NO_VERIFY_SSL -eq "true") {
+            $awsArgs += "--no-verify-ssl"
+          }
+
+          New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+          & aws @awsArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download HASP DLL from S3 ($s3Path). Check S3 credentials or place the DLL locally at $src."
+          }
+
+          if (Test-Path $dst -PathType Leaf) {
+            Write-Host "Successfully downloaded HASP DLL from S3: $dst ($((Get-Item $dst).Length) bytes)"
+          } else {
+            throw "S3 download completed but target file was not created: $dst"
+          }
+
+      - name: Inject DICE_LICENSE_VENDOR_CODE (partner builds only)
+        if: matrix.variant == 'partner'
+        shell: powershell
+        env:
+          DICE_LICENSE_VENDOR_CODE: ${{ secrets.DICE_LICENSE_VENDOR_CODE }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:DICE_LICENSE_VENDOR_CODE)) {
+            throw "DICE_LICENSE_VENDOR_CODE secret is not set - register it in GitHub Settings > Secrets before building partner"
+          }
+          $encoding = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "DICE_LICENSE_VENDOR_CODE=$($env:DICE_LICENSE_VENDOR_CODE)`n", $encoding)
+          Write-Host "DICE_LICENSE_VENDOR_CODE injected into build environment"
+
+      - name: Prepare ONNX build dependencies from BART
+        shell: powershell
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          # Seed the build-script caches from authenticated, checksum-pinned BART artifacts.
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          $username = $env:ARTIFACTORY_USERNAME
+          $password = $env:JFROG_API_TOKEN
+          if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
+              $username = $env:DOCKER_USERNAME
+              $password = $env:DOCKER_PASSWORD
+          }
+          if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
+              throw 'BART credentials are not configured'
+          }
+          $token = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${username}:${password}"))
+          $headers = @{ Authorization = "Basic $token" }
+          $base = 'https://bart.sec.samsung.net/artifactory/dice-generic-local/dice-runner/onnxruntime/ort-sys-2.0.0-rc.12/windows'
+          $root = Join-Path $env:RUNNER_TEMP 'runner-onnx-mirror'
+          $ortCache = Join-Path $root 'ort-cache'
+          $wheelCache = Join-Path $root 'wheels'
+          New-Item -ItemType Directory -Force -Path $root, $wheelCache | Out-Null
+
+          function Get-VerifiedArtifact([string]$Name, [string]$Digest, [string]$Destination) {
+              $partial = "$Destination.part"
+              Invoke-WebRequest -UseBasicParsing -Uri "$base/$Name" -Headers $headers -OutFile $partial -TimeoutSec 3600
+              $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $partial).Hash.ToLowerInvariant()
+              if ($actual -ne $Digest) { throw "SHA-256 mismatch for $Name" }
+              Move-Item -Force -LiteralPath $partial -Destination $Destination
+          }
+
+          # These ZIPs contain the original ort-sys distributions, repackaged after verifying
+          # the upstream tar.lzma2 checksum. Their destinations match ort-sys's cache keys.
+          $ortAssets = @(
+              @{ Name='windows-cpu.zip'; Hash='46883f0946f093545ca27ffec1fa2552a8f5e4618c3b1a0e1c84a5a1d96799a7'; Key='b685bfc8d336e0ba95c066a7a982c03aa6dedd528a492eb99ca4ccb7f3af9e7a' },
+              @{ Name='windows-cuda.zip'; Hash='d609855d59e7e9e95c473aefd201286304a9012131b511a99e61f1bbd63741ff'; Key='8a54165e2dfc85e9f6afbdaf154e7c1c74582e6269a2d0ec93b11e1459309555' }
+          )
+          foreach ($asset in $ortAssets) {
+              $archive = Join-Path $root $asset.Name
+              Get-VerifiedArtifact $asset.Name $asset.Hash $archive
+              $destination = Join-Path $ortCache "dfbin\x86_64-pc-windows-msvc\$($asset.Key)"
+              New-Item -ItemType Directory -Force -Path $destination | Out-Null
+              Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+              Remove-Item -LiteralPath $archive
+          }
+          $wheels = @(
+              @{ Name='nvidia_cublas_cu12-12.9.1.4-py3-none-win_amd64.whl'; Hash='1e5fee10662e6e52bd71dec533fbbd4971bb70a5f24f3bc3793e5c2e9dc640bf' },
+              @{ Name='nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl'; Hash='8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891' },
+              @{ Name='nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl'; Hash='72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349' },
+              @{ Name='nvidia_cufft_cu12-11.4.1.4-py3-none-win_amd64.whl'; Hash='8e5bfaac795e93f80611f807d42844e8e27e340e0cde270dcb6c65386d795b80' },
+              @{ Name='nvidia_cudnn_cu12-9.7.1.26-py3-none-win_amd64.whl'; Hash='7b805b9a4cf9f3da7c5f4ea4a9dff7baf62d1a612d6154a7e0d2ea51ed296241' },
+              @{ Name='onnxruntime_ep_nv_tensorrt_rtx_cu12-0.5.0-py3-none-win_amd64.whl'; Hash='bcf6da6490f5c0796ae02165732edd919c1ff8f7d7648b14a4a76385cbf6d7e8' }
+          )
+          foreach ($wheel in $wheels) {
+              Get-VerifiedArtifact $wheel.Name $wheel.Hash (Join-Path $wheelCache $wheel.Name)
+          }
+          $encoding = New-Object System.Text.UTF8Encoding $false
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "ORT_CACHE_DIR=$ortCache`nDICE_ONNX_WINDOWS_RUNTIME_CACHE=$wheelCache`n", $encoding)
+
+      - name: Publish Windows runner binary release
+        shell: powershell
+        working-directory: runner
+        env:
+          VERSION: ${{ steps.select.outputs.version }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          NO_VERIFY_SSL: ${{ github.event.inputs.no_verify_ssl || vars.RUNNER_RELEASE_NO_VERIFY_SSL || 'false' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $dryRun = if ([string]::IsNullOrWhiteSpace($env:DRY_RUN)) { "false" } else { $env:DRY_RUN }
+          $noVerifySsl = if ([string]::IsNullOrWhiteSpace($env:NO_VERIFY_SSL)) { "false" } else { $env:NO_VERIFY_SSL }
+          $releaseArgs = @{
+            Version = $env:VERSION
+            WindowsVersion = $env:DICE_WINDOWS_VERSION
+            SkipCosmoCompatible = $true
+            SkipEnvOnly = $true
+            StorageBucket = $env:S3_BUCKET
+            StoragePrefix = $env:RUNNER_RELEASE_STORAGE_PREFIX
+          }
+          if ("${{ matrix.variant }}" -eq "partner") { $releaseArgs.Partner = $true }
+          if (-not [string]::IsNullOrWhiteSpace($env:S3_ENDPOINT)) {
+            $releaseArgs.StorageEndpoint = $env:S3_ENDPOINT
+          }
+          if ($dryRun -eq "true") {
+            Write-Host "Dry run requested: building runner release package without S3 upload"
+          } else {
+            $releaseArgs.Upload = $true
+          }
+          if ($noVerifySsl -eq "true") {
+            $releaseArgs.NoVerifySsl = $true
+          }
+
+          & .\scripts\release-windows-platform.ps1 @releaseArgs
+          if ($LASTEXITCODE -ne 0) { throw "release-windows-platform.ps1 failed" }
+
+      - name: Summary
+        if: always()
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Windows runner release publish (${{ matrix.variant }})"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ""
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Property | Value |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "|----------|-------|"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Trigger | ${{ github.event_name }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| MSI/File version | $env:DICE_WINDOWS_VERSION |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Variant | ${{ matrix.variant }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Version | ``${{ steps.select.outputs.version || 'n/a' }}`` |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Release target | ``s3://$($env:S3_BUCKET)/$($env:RUNNER_RELEASE_STORAGE_PREFIX)`` |"
+
+      - name: Cleanup Windows release job
+        if: always()
+        shell: powershell
+        run: |
+          & .\runner\scripts\cleanup-windows-action-tools.ps1 -RemoveRunnerBuild

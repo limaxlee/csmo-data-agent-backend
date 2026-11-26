@@ -1,0 +1,694 @@
+name: Publish Windows Runner Envs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/windows-runner-env-publish.yml'
+      - 'platform/scripts/pack_runner_env.ps1'
+      - 'platform/scripts/prepare_runner_env_legacy_asset.py'
+      - 'platform/scripts/prepare_dice_v1_converter_dir.py'
+      - 'platform/scripts/upload_runner_env_bundle.py'
+      - 'runner/scripts/pack-env.ps1'
+      - 'runner/scripts/setup-windows-action-tools.ps1'
+      - 'runner/scripts/cleanup-windows-action-tools.ps1'
+      - 'runner/dice-v1-converter/**'
+      - 'platform/trainers/**/legacy-assets.json'
+      - 'platform/trainers/**/pyproject.toml'
+      - 'platform/trainers/**/uv.lock'
+      - 'platform/trainers/**/requirements*.in'
+      - 'platform/trainers/**/requirements*.txt'
+      - 'platform/envs/**/pyproject.toml'
+      - 'platform/envs/**/uv.lock'
+      - 'platform/envs/**/requirements*.in'
+      - 'platform/envs/**/requirements*.txt'
+      - 'platform/dice-serving/**'
+  workflow_dispatch:
+    inputs:
+      frameworks:
+        description: 'Frameworks to publish: changed, all, or comma-separated names'
+        required: false
+        default: 'changed'
+        type: string
+      force_upload:
+        description: 'Replace existing bundle object for the same version'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      dry_run:
+        description: 'Build packages and print env upload actions without writing to S3'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      skip_validate:
+        description: 'Skip dice-runner bundle validation'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      keep_per_alias:
+        description: 'Number of old env versions to retain per framework alias'
+        required: false
+        default: '5'
+        type: string
+      python_release:
+        description: 'python-build-standalone release tag'
+        required: false
+        default: 'latest'
+        type: string
+      single_put:
+        description: 'Disable multipart upload for env bundles'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      payload_signing:
+        description: 'Enable S3 payload signing for env bundle uploads'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      no_verify_ssl:
+        description: 'Disable SSL certificate verification for env storage operations'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-runner-env-publish
+  cancel-in-progress: false
+
+env:
+  ALL_FRAMEWORKS: huggingface onnx-shared openmm-cpu-py38 openmm-cpu-py39 openmm-cu118 openmm-cu118-external openmm-cu128 openmm-cu128-external timm ultralytics vfm-v1 vfm-v1-cu128 vfm-v3-det-bastion
+  S3_BUCKET: ${{ vars.S3_BUCKET || secrets.S3_BUCKET }}
+  RUNNER_ENV_CONFIGURED_STORAGE_PREFIX: ${{ vars.RUNNER_ENV_STORAGE_PREFIX }}
+  RUNNER_ENV_CONFIGURED_WINDOWS_STORAGE_PREFIX: ${{ vars.RUNNER_ENV_WINDOWS_STORAGE_PREFIX }}
+  RUNNER_ENV_STORAGE_PREFIX: ${{ vars.RUNNER_ENV_WINDOWS_STORAGE_PREFIX || 'runner-envs/windows' }}
+  RUNNER_ENV_NO_VERIFY_SSL: ${{ vars.RUNNER_ENV_NO_VERIFY_SSL || 'false' }}
+  RUNNER_ENV_PYTHON_TARBALL_WINDOWS_PREFIX: ${{ vars.RUNNER_ENV_PYTHON_TARBALL_WINDOWS_PREFIX || 'runner-env-assets/python-build-standalone/windows/x86_64' }}
+  S3_ENDPOINT: ${{ vars.S3_ENDPOINT || secrets.S3_ENDPOINT }}
+  S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+  S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+  S3_REGION: ${{ vars.S3_REGION || 'us-east-1' }}
+  UV_SYSTEM_CERTS: ${{ vars.RUNNER_ENV_UV_SYSTEM_CERTS || vars.UV_SYSTEM_CERTS || 'true' }}
+
+jobs:
+  setup:
+    runs-on: [code-windows]
+    outputs:
+      frameworks_json: ${{ steps.select.outputs.frameworks_json }}
+      frameworks_csv: ${{ steps.select.outputs.frameworks_csv }}
+      count: ${{ steps.select.outputs.count }}
+      version: ${{ steps.select.outputs.version }}
+      storage_prefix: ${{ steps.storage.outputs.prefix }}
+    steps:
+      - name: Check if publish is enabled
+        shell: powershell
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH_ENABLED: ${{ vars.ENABLE_WINDOWS_RUNNER_PUBLISH || vars.ENABLE_RUNNER_ENV_PUBLISH || vars.ENABLE_HELM_PUBLISH }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:PUBLISH_ENABLED -ne "true") {
+            Write-Warning "Skipping - set ENABLE_WINDOWS_RUNNER_PUBLISH=true, ENABLE_RUNNER_ENV_PUBLISH=true, or ENABLE_HELM_PUBLISH=true to enable Windows runner env publishing"
+            exit 1
+          }
+
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Select Windows publish targets
+        id: select
+        shell: powershell
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          REQUESTED_FRAMEWORKS: ${{ github.event.inputs.frameworks }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $knownFrameworks = @($env:ALL_FRAMEWORKS -split "\s+" | Where-Object { $_ })
+
+          function Normalize-Requested([string]$Value, [string]$Default) {
+            if ([string]::IsNullOrWhiteSpace($Value)) {
+              $Value = $Default
+            }
+            return (($Value.ToLowerInvariant() -replace "[,;]", " ") -replace "\s+", " ").Trim()
+          }
+
+          function Assert-KnownFramework([string]$Framework) {
+            if ($knownFrameworks -notcontains $Framework) {
+              throw "Unknown framework '$Framework'. Known: $($knownFrameworks -join ', ')"
+            }
+          }
+
+          function Get-DiceServingConsumers([string[]]$AllowedFrameworks) {
+            # Frameworks whose uv.lock currently depends on platform/dice-serving as a
+            # local path/directory (or editable) source. Scans the live lockfiles rather
+            # than the diff, since we need to know who depends on it today, not who
+            # changed.
+            $consumers = @()
+            $lockfiles = @(Get-ChildItem -Path "platform/trainers", "platform/envs" -Recurse -Filter "uv.lock" -ErrorAction SilentlyContinue)
+            $repoRoot = (Get-Location).Path
+            foreach ($lockfile in $lockfiles) {
+              $content = Get-Content -LiteralPath $lockfile.FullName -Raw -Encoding UTF8
+              if ($content -notmatch '(directory|editable)\s*=\s*"[^"]*dice-serving"') {
+                continue
+              }
+              $rel = ($lockfile.DirectoryName.Substring($repoRoot.Length)).TrimStart("\", "/") -replace "\\", "/"
+              if ($rel -match "^platform/trainers/([^/]+)/envs/([^/]+)$") {
+                $consumers += "$($Matches[1])-$($Matches[2])"
+              } elseif ($rel -match "^platform/(trainers|envs)/([^/]+)$") {
+                $consumers += $Matches[2]
+              }
+            }
+            # Trainer projects can depend on dice-serving without having a
+            # runner-env bundle (for example, dice_v1). Only schedule
+            # frameworks this publisher actually knows how to build.
+            return @($consumers | Where-Object { $AllowedFrameworks -contains $_ } | Sort-Object -Unique)
+          }
+
+          function Get-BaseSha([string]$HeadSha, [string]$BeforeSha) {
+            if (-not [string]::IsNullOrWhiteSpace($BeforeSha) -and $BeforeSha -ne "0000000000000000000000000000000000000000") {
+              git cat-file -e "$BeforeSha^{commit}" 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                return $BeforeSha
+              }
+            }
+
+            $parent = git rev-parse "$HeadSha^" 2>$null
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($parent)) {
+              return $parent.Trim()
+            }
+
+            return (git rev-list --max-parents=0 $HeadSha | Select-Object -Last 1).Trim()
+          }
+
+          function Get-ChangedFiles {
+            $head = $env:GITHUB_SHA
+            $base = Get-BaseSha -HeadSha $head -BeforeSha $env:BEFORE_SHA
+            $files = @(git diff --name-only $base $head | ForEach-Object { $_ -replace "\\", "/" })
+            $files | Set-Content -Encoding UTF8 changed-files.txt
+            return $files
+          }
+
+          $requested = Normalize-Requested $env:REQUESTED_FRAMEWORKS "changed"
+          $selectedFrameworks = @()
+          $changedFiles = @()
+
+          if ($env:EVENT_NAME -ne "schedule") {
+            $changedFiles = @(Get-ChangedFiles)
+          }
+
+          if ($env:EVENT_NAME -eq "schedule") {
+            Write-Host "Scheduled build: selecting all Windows runner env frameworks"
+            $selectedFrameworks = $knownFrameworks
+          } elseif ($requested -eq "all") {
+            Write-Host "Manual all build requested"
+            $selectedFrameworks = $knownFrameworks
+          } elseif ($requested -ne "changed") {
+            $selectedFrameworks = @($requested -split "\s+" | Where-Object { $_ })
+            foreach ($framework in $selectedFrameworks) {
+              Assert-KnownFramework $framework
+            }
+          } else {
+            $sharedToolingChanged = $false
+            foreach ($path in $changedFiles) {
+              if ($path -match "^(\.github/workflows/windows-runner-env-publish\.yml|platform/scripts/(pack_runner_env\.ps1|prepare_runner_env_legacy_asset\.py|prepare_dice_v1_converter_dir\.py|upload_runner_env_bundle\.py)|runner/scripts/pack-env\.ps1)$") {
+                $sharedToolingChanged = $true
+                break
+              }
+            }
+
+            if ($sharedToolingChanged) {
+              Write-Host "Shared Windows runner env tooling changed: selecting all frameworks"
+              $selectedFrameworks = $knownFrameworks
+            } else {
+              foreach ($path in $changedFiles) {
+                if ($path -match "^platform/(trainers|envs)/([^/]+)/(legacy-assets\.json|pyproject\.toml|uv\.lock|requirements.*\.(in|txt))$") {
+                  if ($knownFrameworks -contains $Matches[2]) { $selectedFrameworks += $Matches[2] }
+                } elseif ($path -match "^platform/trainers/([^/]+)/envs/([^/]+)/(legacy-assets\.json|pyproject\.toml|uv\.lock|requirements.*\.(in|txt))$") {
+                  $selectedFrameworks += "$($Matches[1])-$($Matches[2])"
+                }
+              }
+
+              $diceServingChanged = $changedFiles | Where-Object { $_ -match "^platform/dice-serving/" } | Select-Object -First 1
+              if ($diceServingChanged) {
+                # platform/dice-serving is a shared local-path dependency — rebuild only
+                # the frameworks that actually consume it, not every framework.
+                $diceServingConsumers = @(Get-DiceServingConsumers -AllowedFrameworks $knownFrameworks)
+                Write-Host "dice-serving changed: adding its consumer frameworks ($(if ($diceServingConsumers.Count) { $diceServingConsumers -join ', ' } else { 'none' }))"
+                $selectedFrameworks += $diceServingConsumers
+              }
+
+              $diceV1ConverterChanged = $changedFiles | Where-Object { $_ -match "^runner/dice-v1-converter/" } | Select-Object -First 1
+              if ($diceV1ConverterChanged) {
+                # dice-v1-converter is copied into the bundle only for the openmm-cu118/cu128
+                # variants, internal and -external (see pack_runner_env.ps1 Prepare-LegacyDiceV1ConverterDir).
+                Write-Host "dice-v1-converter changed: adding its consumer frameworks (openmm-cu118, openmm-cu118-external, openmm-cu128, openmm-cu128-external)"
+                $selectedFrameworks += @("openmm-cu118", "openmm-cu118-external", "openmm-cu128", "openmm-cu128-external")
+              }
+            }
+          }
+
+          $selectedFrameworks = @($selectedFrameworks | Where-Object { $_ } | Sort-Object -Unique)
+          foreach ($framework in $selectedFrameworks) {
+            Assert-KnownFramework $framework
+          }
+
+          $commitDate = (git show -s --format=%cs $env:GITHUB_SHA).Trim() -replace "-", "."
+          $shortSha = (git rev-parse --short=8 $env:GITHUB_SHA).Trim()
+          $version = "$commitDate-$shortSha"
+          $frameworksCsv = $selectedFrameworks -join ","
+
+          # Batch all GITHUB_OUTPUT writes into one Add-Content call to avoid
+          # Windows file-lock races when the runner reads the file concurrently.
+          $frameworkLines = $selectedFrameworks -join "`n"
+          $frameworksJson = ConvertTo-Json -Compress -InputObject @($selectedFrameworks)
+          $outputContent = "frameworks<<EOF`n$frameworkLines`nEOF`nframeworks_json=$frameworksJson`nframeworks_csv=$frameworksCsv`ncount=$($selectedFrameworks.Count)`nversion=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $outputContent
+
+          Write-Host "Selected frameworks: $(if ($frameworksCsv) { $frameworksCsv } else { 'none' })"
+          Write-Host "Version: $version"
+
+      - name: Normalize Windows storage prefixes
+        id: storage
+        if: steps.select.outputs.count != '0'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          function Normalize-Prefix([string]$Value) {
+            return ($Value.Trim() -replace "\\", "/").Trim("/")
+          }
+
+          $windowsPrefix = Normalize-Prefix $env:RUNNER_ENV_CONFIGURED_WINDOWS_STORAGE_PREFIX
+          $genericPrefix = Normalize-Prefix $env:RUNNER_ENV_CONFIGURED_STORAGE_PREFIX
+
+          if (-not [string]::IsNullOrWhiteSpace($windowsPrefix)) {
+            $runnerEnvPrefix = $windowsPrefix
+          } elseif (-not [string]::IsNullOrWhiteSpace($genericPrefix)) {
+            if ($genericPrefix -match "(^|/)windows$") {
+              $runnerEnvPrefix = $genericPrefix
+            } elseif ($genericPrefix -match "^(.*)/linux$") {
+              $runnerEnvPrefix = "$($Matches[1])/windows"
+            } else {
+              $runnerEnvPrefix = "$genericPrefix/windows"
+            }
+          } else {
+            $runnerEnvPrefix = "runner-envs/windows"
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "RUNNER_ENV_STORAGE_PREFIX=$runnerEnvPrefix"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "prefix=$runnerEnvPrefix"
+          Write-Host "Windows runner env prefix: $runnerEnvPrefix"
+
+      - name: Validate storage configuration
+        if: steps.select.outputs.count != '0'
+        shell: powershell
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SELECTED_FRAMEWORK_COUNT: ${{ steps.select.outputs.count }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dryRun = if ([string]::IsNullOrWhiteSpace($env:DRY_RUN)) { "false" } else { $env:DRY_RUN }
+          $missing = New-Object System.Collections.Generic.List[string]
+
+          if ($env:SELECTED_FRAMEWORK_COUNT -ne "0") {
+            foreach ($name in @("S3_BUCKET", "RUNNER_ENV_STORAGE_PREFIX")) {
+              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                $missing.Add($name)
+              }
+            }
+            if ($dryRun -ne "true") {
+              foreach ($name in @("S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY")) {
+                if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+                  $missing.Add($name)
+                }
+              }
+            }
+          }
+
+          if ($missing.Count -gt 0) {
+            foreach ($name in ($missing | Sort-Object -Unique)) {
+              Write-Error "$name is not configured"
+            }
+            exit 1
+          }
+
+          if ($env:SELECTED_FRAMEWORK_COUNT -ne "0") {
+            Write-Host "Publishing Windows envs to s3://$env:S3_BUCKET/$env:RUNNER_ENV_STORAGE_PREFIX"
+          }
+
+      - name: Setup Node.js
+        if: steps.select.outputs.count != '0'
+        uses: code-actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install isolated Windows build tools
+        if: steps.select.outputs.count != '0'
+        shell: powershell
+        run: |
+          & .\runner\scripts\setup-windows-action-tools.ps1 -SetupMsvc -InstallRust -InstallPnpm
+          if ($LASTEXITCODE -ne 0) { throw "Windows build tool setup failed" }
+
+      - name: Prepare ONNX CPU build dependency from BART
+        if: steps.select.outputs.count != '0'
+        shell: powershell
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $username = $env:ARTIFACTORY_USERNAME
+          $password = $env:JFROG_API_TOKEN
+          if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
+            $username = $env:DOCKER_USERNAME
+            $password = $env:DOCKER_PASSWORD
+          }
+          if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
+            throw 'BART credentials are not configured'
+          }
+          $token = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${username}:${password}"))
+          $headers = @{ Authorization = "Basic $token" }
+          $base = 'https://bart.sec.samsung.net/artifactory/dice-generic-local/dice-runner/onnxruntime/ort-sys-2.0.0-rc.12/windows'
+          $root = Join-Path $env:RUNNER_TEMP 'runner-onnx-mirror'
+          $ortCache = Join-Path $root 'ort-cache'
+          $key = 'b685bfc8d336e0ba95c066a7a982c03aa6dedd528a492eb99ca4ccb7f3af9e7a'
+          $destination = Join-Path $ortCache "dfbin\x86_64-pc-windows-msvc\$key"
+          $archive = Join-Path $root 'windows-cpu.zip'
+          New-Item -ItemType Directory -Force -Path $root, $destination | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Uri "$base/windows-cpu.zip" -Headers $headers -OutFile "$archive.part" -TimeoutSec 3600
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath "$archive.part").Hash.ToLowerInvariant()
+          if ($actual -ne '46883f0946f093545ca27ffec1fa2552a8f5e4618c3b1a0e1c84a5a1d96799a7') { throw 'SHA-256 mismatch for windows-cpu.zip' }
+          Move-Item -Force -LiteralPath "$archive.part" -Destination $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+          Remove-Item -LiteralPath $archive
+          $encoding = New-Object System.Text.UTF8Encoding $false
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "ORT_CACHE_DIR=$ortCache`n", $encoding)
+
+      - name: Build Windows runner binary
+        if: steps.select.outputs.count != '0'
+        shell: powershell
+        env:
+          # Shared Windows runners cannot reach the certificate revocation servers.
+          # Cargo still validates the TLS certificate chain.
+          CARGO_HTTP_CHECK_REVOKE: 'false'
+          # What this job uploads is dice-runner.exe, which links no ONNX Runtime, so the feature set changes
+          # nothing it ships.  build.ps1 defaults to cuda, which would fetch the cu12 asset to build an engine
+          # no step here reads; cpu keeps this job on the asset it used before.
+          FEATURES: 'cpu'
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\runner\scripts\build.ps1
+
+      - name: Upload Windows runner binary artifact
+        if: steps.select.outputs.count != '0'
+        uses: CODE-Actions/upload-artifact@v2
+        with:
+          name: windows-env-publish-runner-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runner/target/release/dice-runner.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Summary
+        if: always()
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Windows runner env publish setup"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ""
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Property | Value |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "|----------|-------|"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Trigger | ${{ github.event_name }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Frameworks | ``${{ steps.select.outputs.frameworks_csv || 'none' }}`` |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Version | ``${{ steps.select.outputs.version || 'n/a' }}`` |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Env target | ``s3://$($env:S3_BUCKET)/$($env:RUNNER_ENV_STORAGE_PREFIX)`` |"
+
+
+      - name: Cleanup Windows setup job
+        if: always()
+        shell: powershell
+        run: |
+          & .\runner\scripts\cleanup-windows-action-tools.ps1 -RemoveRunnerBuild
+
+  publish:
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    name: publish (${{ matrix.framework }})
+    runs-on: [code-windows]
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        framework: ${{ fromJson(needs.setup.outputs.frameworks_json) }}
+    env:
+      RUNNER_ENV_STORAGE_PREFIX: ${{ needs.setup.outputs.storage_prefix }}
+    steps:
+      - name: Checkout
+        uses: code-actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GIT_USERTOKEN }}
+
+      - name: Configure Artifactory credentials for CUDA 12.8 environments
+        if: matrix.framework == 'vfm-v1-cu128' || matrix.framework == 'openmm-cu128' || matrix.framework == 'openmm-cu128-external'
+        shell: powershell
+        env:
+          ARTIFACTORY_USERNAME: ${{ secrets.JFROG_USERNAME || secrets.ARTIFACTORY_USERNAME || secrets.BART_USERNAME }}
+          JFROG_API_TOKEN: ${{ secrets.JFROG_API_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:ARTIFACTORY_USERNAME) -or [string]::IsNullOrWhiteSpace($env:JFROG_API_TOKEN)) {
+            throw "Artifactory credentials are not configured"
+          }
+          $netrcFile = Join-Path $env:RUNNER_TEMP "vfm-artifactory.netrc"
+          $netrcContent = "machine bart.sec.samsung.net login $($env:ARTIFACTORY_USERNAME) password $($env:JFROG_API_TOKEN)`n"
+          [System.IO.File]::WriteAllText($netrcFile, $netrcContent, [System.Text.UTF8Encoding]::new($false))
+          Add-Content -Path $env:GITHUB_ENV -Value "NETRC=$netrcFile"
+
+      - name: Setup Python
+        uses: code-actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install isolated Python package tools
+        shell: powershell
+        run: |
+          & .\runner\scripts\setup-windows-action-tools.ps1 -PythonPackages @('uv', 'boto3', 'botocore', 'python-dotenv')
+          if ($LASTEXITCODE -ne 0) { throw "Python package tool setup failed" }
+
+      - name: Download Windows runner binary artifact
+        uses: CODE-Actions/download-artifact@v2
+        with:
+          name: windows-env-publish-runner-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runner/target/release
+
+      - name: Verify Windows runner binary artifact
+        shell: powershell
+        run: |
+          $binary = Join-Path $env:GITHUB_WORKSPACE 'runner\target\release\dice-runner.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Runner binary artifact missing: $binary" }
+
+      - name: Prime python-build-standalone cache
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $cacheDir = Join-Path $env:RUNNER_TEMP "python-build-standalone"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+          Add-Content -Path $env:GITHUB_ENV -Value "PYTHON_BUILD_STANDALONE_CACHE=$cacheDir"
+
+          @'
+          import os
+          import sys
+          from pathlib import Path
+
+          import boto3
+          from botocore.config import Config
+
+          def env_bool(name):
+              return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+          bucket = os.getenv("S3_BUCKET", "").strip()
+          prefix = os.getenv("RUNNER_ENV_PYTHON_TARBALL_WINDOWS_PREFIX", "").strip().strip("/")
+          endpoint = os.getenv("S3_ENDPOINT", "").strip()
+          access_key = os.getenv("S3_ACCESS_KEY", "").strip()
+          secret_key = os.getenv("S3_SECRET_KEY", "").strip()
+          cache_dir = Path(os.getenv("RUNNER_TEMP", ".")) / "python-build-standalone"
+
+          if not all((bucket, prefix, endpoint, access_key, secret_key)):
+              print("[python-cache] storage config is incomplete; python-build-standalone will use its normal resolver", file=sys.stderr)
+              raise SystemExit(0)
+
+          client = boto3.client(
+              "s3",
+              endpoint_url=endpoint,
+              aws_access_key_id=access_key,
+              aws_secret_access_key=secret_key,
+              region_name=os.getenv("S3_REGION") or "us-east-1",
+              verify=not env_bool("RUNNER_ENV_NO_VERIFY_SSL"),
+              config=Config(
+                  signature_version="s3v4",
+                  request_checksum_calculation="when_required",
+                  response_checksum_validation="when_required",
+                  s3={"addressing_style": "path"},
+              ),
+          )
+
+          paginator = client.get_paginator("list_objects_v2")
+          downloaded = 0
+          for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/"):
+              for item in page.get("Contents", []):
+                  key = str(item.get("Key") or "")
+                  name = Path(key).name
+                  if not name.startswith("cpython-") or "windows-msvc-install_only.tar." not in name:
+                      continue
+                  dest = cache_dir / name
+                  if dest.exists() and dest.stat().st_size == int(item.get("Size") or -1):
+                      print(f"[python-cache] cached {name}")
+                  else:
+                      print(f"[python-cache] downloading s3://{bucket}/{key}")
+                      client.download_file(bucket, key, str(dest))
+                  downloaded += 1
+
+          if downloaded == 0:
+              print(f"[python-cache] no Windows python-build-standalone tarballs found under s3://{bucket}/{prefix}/; normal resolver will be used", file=sys.stderr)
+              raise SystemExit(0)
+
+          print(f"[python-cache] prepared {downloaded} tarball(s) in {cache_dir}")
+          '@ | python -
+
+      - name: Pack and upload Windows runner env
+        shell: powershell
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FRAMEWORK: ${{ matrix.framework }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          FORCE_UPLOAD: ${{ github.event.inputs.force_upload }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SKIP_VALIDATE: ${{ github.event.inputs.skip_validate }}
+          KEEP_PER_ALIAS: ${{ github.event.inputs.keep_per_alias }}
+          PYTHON_RELEASE: ${{ github.event.inputs.python_release }}
+          SINGLE_PUT: ${{ github.event.inputs.single_put }}
+          PAYLOAD_SIGNING: ${{ github.event.inputs.payload_signing }}
+          NO_VERIFY_SSL: ${{ github.event.inputs.no_verify_ssl || vars.RUNNER_ENV_NO_VERIFY_SSL || 'false' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_COM_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $forceUpload = if ([string]::IsNullOrWhiteSpace($env:FORCE_UPLOAD)) { "true" } else { $env:FORCE_UPLOAD }
+          $dryRun = if ([string]::IsNullOrWhiteSpace($env:DRY_RUN)) { "false" } else { $env:DRY_RUN }
+          $skipValidate = if ([string]::IsNullOrWhiteSpace($env:SKIP_VALIDATE)) { "false" } else { $env:SKIP_VALIDATE }
+          $keepPerAlias = if ([string]::IsNullOrWhiteSpace($env:KEEP_PER_ALIAS)) { "5" } else { $env:KEEP_PER_ALIAS }
+          $pythonRelease = if ([string]::IsNullOrWhiteSpace($env:PYTHON_RELEASE)) { "latest" } else { $env:PYTHON_RELEASE }
+          $singlePut = if ([string]::IsNullOrWhiteSpace($env:SINGLE_PUT)) { "false" } else { $env:SINGLE_PUT }
+          $payloadSigning = if ([string]::IsNullOrWhiteSpace($env:PAYLOAD_SIGNING)) { "false" } else { $env:PAYLOAD_SIGNING }
+          $noVerifySsl = if ([string]::IsNullOrWhiteSpace($env:NO_VERIFY_SSL)) { "false" } else { $env:NO_VERIFY_SSL }
+          $validateBin = (Resolve-Path ".\runner\target\release\dice-runner.exe").Path
+
+          if ($noVerifySsl -eq "true") {
+            $env:RUNNER_ENV_NO_VERIFY_SSL = "true"
+          }
+
+          $uploadCommonArgs = @(
+            "--bucket", $env:S3_BUCKET,
+            "--prefix", $env:RUNNER_ENV_STORAGE_PREFIX,
+            "--keep-per-alias", $keepPerAlias,
+            "--description", "Windows runner env built by GitHub Actions run $env:GITHUB_RUN_ID from $env:GITHUB_SHA"
+          )
+          if ($forceUpload -eq "true") { $uploadCommonArgs += "--force" }
+          if ($dryRun -eq "true") { $uploadCommonArgs += "--dry-run" }
+          if ($singlePut -eq "true") { $uploadCommonArgs += "--single-put" }
+          if ($payloadSigning -eq "true") { $uploadCommonArgs += "--payload-signing" }
+          if ($noVerifySsl -eq "true") { $uploadCommonArgs += "--no-verify-ssl" }
+
+          $framework = $env:FRAMEWORK
+          if ([string]::IsNullOrWhiteSpace($framework)) {
+            throw "matrix framework is empty"
+          }
+
+          $bundle = "platform/dist/runner-envs/dice-env-windows-x86_64-$framework.zip"
+          $packArgs = @{
+            Version = $env:VERSION
+            Os = "windows"
+            Arch = "x86_64"
+            PythonRelease = $pythonRelease
+          }
+          if ($skipValidate -eq "true") {
+            $packArgs.SkipValidate = $true
+          } else {
+            $packArgs.ValidateBin = $validateBin
+          }
+
+          # Map dir-level identifier to pack script flags
+          $packFrameworkArgs = switch ($framework) {
+            "openmm-cu118"     { @{Framework="openmm"; Cuda="cu118"} }
+            "openmm-cu128"     { @{Framework="openmm"; Cuda="cu128"} }
+            "vfm-v1-cu128"    { @{Framework="vfm-v1"; Cuda="cu128"} }
+            "openmm-cu118-external" { @{Framework="openmm"; Cuda="cu118-external"} }
+            "openmm-cu128-external" { @{Framework="openmm"; Cuda="cu128-external"} }
+            "openmm-cpu-py38"  { @{Framework="openmm"; Cpu=$true; Python="3.8"} }
+            "openmm-cpu-py39"  { @{Framework="openmm"; Cpu=$true; Python="3.9"} }
+            default            { @{Framework=$framework} }
+          }
+          $packArgs = $packArgs + $packFrameworkArgs
+
+          Write-Host "::group::Pack $framework"
+          & .\platform\scripts\pack_runner_env.ps1 @packArgs
+          if ($LASTEXITCODE -ne 0) { throw "pack_runner_env.ps1 failed for $framework" }
+          Write-Host "::endgroup::"
+
+          Write-Host "::group::Upload $framework"
+          $uploadArgs = @("platform/scripts/upload_runner_env_bundle.py", "--bundle", $bundle) + $uploadCommonArgs
+          & python @uploadArgs
+          if ($LASTEXITCODE -ne 0) { throw "upload_runner_env_bundle.py failed for $framework" }
+          Write-Host "::endgroup::"
+
+      - name: Summary
+        if: always()
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Windows runner env publish"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ""
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Property | Value |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "|----------|-------|"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Trigger | ${{ github.event_name }} |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Framework | ``${{ matrix.framework }}`` |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Version | ``${{ needs.setup.outputs.version || 'n/a' }}`` |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| Env target | ``s3://$($env:S3_BUCKET)/$($env:RUNNER_ENV_STORAGE_PREFIX)`` |"
+
+
+      - name: Cleanup Windows env publish job
+        if: always()
+        shell: powershell
+        run: |
+          & .\runner\scripts\cleanup-windows-action-tools.ps1 -RemoveRunnerEnvBundle

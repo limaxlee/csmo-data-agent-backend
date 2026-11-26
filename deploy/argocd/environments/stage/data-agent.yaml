@@ -1,0 +1,59 @@
+# Stage values for the data-agent chart.
+# Referenced by the data-agent-stage Argo CD Application.
+# Address: https://stage.gtrai.sec.samsung.net/data-agent   Namespace: dice-stage
+#
+# No passwords or keys in this file. They are in the Kubernetes Secret named
+# below, which is created by hand in dice-stage.
+#
+# The database is not set here. Stage gets its own Postgres from the chart
+# (pod data-agent-postgres in dice-stage), and the chart points the backend
+# at it.
+
+namePrefix: data-agent
+
+secret:
+  # Must exist in dice-stage before the first sync (NOT in git).
+  name: data-agent-stage-secrets
+
+backend:
+  # The tag printed when the image was pushed, for example "2026.11.26-7561e6b".
+  tag: ""
+  env:
+    OBJECT_STORAGE_BUCKET: "cosmo-storage"
+    OBJECT_STORAGE_ENDPOINT: "https://s3.ap-northeast-2.samsungspc.com"
+    ROOT_MODEL_OPENAPI_MODEL: "openai/qwen/qwen3.8-flash-next"
+    ROOT_MODEL_OPENAPI_ENDPOINT: "https://mlp-service.n10.sr-cloud.com/service-gtr-ai-vision-dice-agent/v1"
+    ROOT_MODEL_OPENAPI_MODEL_ID: "605"
+    TITLE_MODEL_OPENAPI_MODEL: "openai/qwen/qwen3.8-flash-next"
+    TITLE_MODEL_OPENAPI_ENDPOINT: "https://mlp-service.n10.sr-cloud.com/service-gtr-ai-vision-dice-agent/v1"
+    TITLE_MODEL_OPENAPI_MODEL_ID: "81"
+
+frontend:
+  tag: ""
+
+mongodbMcp:
+  tag: ""
+  env:
+    MONGODB_HOST: "dev.gtrai.sec.samsung.net"
+    MONGODB_PORT: "27017"
+    MONGODB_DB_NAME: "cosmoData"
+
+milvusMcp:
+  tag: ""
+  env:
+    MILVUS_HOST: "10.240.35.180"
+    MILVUS_PORT: "19530"
+    MILVUS_DB_NAME: "cosmoData"
+    FEATURE_EXTRACTOR_HOST: "10.240.28.235"
+    FEATURE_EXTRACTOR_PORT: "24502"
+    OBJECT_STORAGE_BUCKET: "cosmo-storage"
+    OBJECT_STORAGE_ENDPOINT: "https://s3.ap-northeast-2.samsungspc.com"
+
+virtualService:
+  enabled: true
+  name: data-agent-stage
+  hosts:
+    - stage.gtrai.sec.samsung.net
+  gateways:
+    - istio-system/platform-gateway
+  redirectHttpToHttps: true

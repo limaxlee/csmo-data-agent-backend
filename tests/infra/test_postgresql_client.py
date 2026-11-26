@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy.engine import make_url
 
 from common.config import SETTINGS
 from data_agent.infra import postgresql_client as postgres_client_module
@@ -6,11 +7,22 @@ from data_agent.infra.postgresql_client import PostgreSQLClient, postgresql_dsn
 
 
 class TestPostgreSQLDsn:
-    def test_postgres_dsn(self):
+    def test_postgres_dsn(self, monkeypatch):
         db = SETTINGS.postgresql_db
+        monkeypatch.setattr(db, "password", "")
 
         assert postgresql_dsn() == f"postgresql+asyncpg://{db.user}@{db.host}:{db.port}/{db.name}"
         assert postgresql_dsn("other_db") == f"postgresql+asyncpg://{db.user}@{db.host}:{db.port}/other_db"
+
+        monkeypatch.setattr(db, "password", "db-password")
+        assert postgresql_dsn() == f"postgresql+asyncpg://{db.user}:db-password@{db.host}:{db.port}/{db.name}"
+
+        monkeypatch.setattr(db, "password", "p@ss:word/1 %")
+        dsn = postgresql_dsn("other_db")
+        assert "p@ss:word/1 %" not in dsn
+        assert make_url(dsn).password == "p@ss:word/1 %"
+        assert make_url(dsn).host == db.host
+        assert make_url(dsn).database == "other_db"
 
 
 class TestPostgreSQLClient:

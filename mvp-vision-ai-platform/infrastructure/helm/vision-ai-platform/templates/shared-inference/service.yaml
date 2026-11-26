@@ -1,0 +1,11 @@
+{{- if .Values.sharedInference.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vision-ai.sharedInference.name" . }}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/instance: {{ include "vision-ai.sharedInference.name" . }}}
+  ports: [{name: http, port: 8080, targetPort: http}]
+{{- end -}}
+

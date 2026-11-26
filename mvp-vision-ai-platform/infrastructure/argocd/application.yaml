@@ -1,0 +1,53 @@
+# Vision AI Platform - ArgoCD Application (bootstrap sample)
+# Bootstrap example only; do NOT apply over an existing live Application.
+#
+# The running Application is maintained in ArgoCD, and image tags are rolled by
+# .github/workflows/helm-publish-internal.yaml with `argocd app set --helm-set`.
+#
+# Before applying this to a new environment:
+#   1. Set repoURL, a tested Git revision, Application/release name and namespace.
+#   2. Set environment overrides in helm.values below (no environment values files).
+#   3. Keep secrets out of this file; they are read from Kubernetes Secrets
+#      (see secret.yaml.example).
+#
+# Prerequisites:
+#   1. Apply secret first: kubectl apply -f secret.yaml
+#   2. Apply project: kubectl apply -f project.yaml
+#   3. Apply this application: kubectl apply -f application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vision-ai-platform
+  namespace: argocd
+spec:
+  project: vision-ai
+  source:
+    repoURL: https://your-git-server/your-org/mvp-vision-ai-platform.git
+    path: infrastructure/helm/vision-ai-platform
+    targetRevision: REPLACE_WITH_TESTED_GIT_REVISION
+    helm:
+      # Overrides only. Full defaults live in
+      # infrastructure/helm/vision-ai-platform/values.yaml.
+      # Preserve existing helm.parameters when updating a live Application.
+      releaseName: vision-ai-platform
+      values: |
+        platform:
+          training:
+            enabled: true
+            namespace: vision-ai
+            storage:
+              datasets:
+                enabled: true
+            datasetCache:
+              enabled: true
+              image:
+                repository: vision-ai-dataset-cache
+                tag: latest
+                pullPolicy: Always
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vision-ai
+  syncPolicy:
+    # Initial sync/prune is manual until storage, secrets and routing are verified.
+    syncOptions:
+      - CreateNamespace=true

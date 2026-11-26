@@ -1,0 +1,47 @@
+# Bootstrap example only; review permissions before applying.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: vision-ai
+  namespace: argocd
+spec:
+  description: Vision AI Training Platform
+
+  # Source repositories
+  sourceRepos:
+    - https://your-git-server/your-org/mvp-vision-ai-platform.git
+
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: vision-ai
+      server: https://kubernetes.default.svc
+
+  # Cluster resource whitelist
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+
+  # Report orphaned resources; this does not authorize deletion.
+  orphanedResources:
+    warn: true
+
+  # Roles for project access
+  roles:
+    - name: admin
+      description: Admin access to vision-ai project
+      policies:
+        - p, proj:vision-ai:admin, applications, *, vision-ai/*, allow
+      groups:
+        - vision-ai-admins
+
+    - name: developer
+      description: Developer access (read + sync)
+      policies:
+        - p, proj:vision-ai:developer, applications, get, vision-ai/*, allow
+        - p, proj:vision-ai:developer, applications, sync, vision-ai/*, allow
+      groups:
+        - vision-ai-developers

@@ -1,0 +1,11 @@
+{{- if and .Values.sharedInference.enabled (not .Values.sharedInference.blobStorage.existingClaim) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vision-ai.sharedInference.name" . }}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: {{ .Values.sharedInference.blobStorage.storageClass | quote }}
+  resources:
+    requests: {storage: {{ .Values.sharedInference.blobStorage.size }}}
+{{- end -}}

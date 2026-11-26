@@ -3,7 +3,17 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from common.config import SETTINGS, AuthConfig, load_config
+from common.config import SETTINGS, AuthConfig, SessionDBConfig, load_config
+
+
+class TestSessionDBConfig:
+    def test_session_db_config(self):
+        config = SessionDBConfig(host="db-host", port=5432, name="db-name", user="db-user")
+
+        assert config.password == ""
+
+        config = SessionDBConfig(host="db-host", port=5432, name="db-name", user="db-user", password="db-password")
+        assert config.password == "db-password"
 
 
 class TestAuthConfig:
@@ -54,3 +64,18 @@ class TestLoadConfig:
         monkeypatch.setenv("AUTH_SERVICE_JWT_SECRET", "from-environment")
 
         assert load_config()["auth"]["service_jwt_secret"] == "from-environment"
+
+    def test_load_config_reads_postgresql_password_from_environment(self, monkeypatch, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("server_port: 18080\npostgresql_db:\n  host: db-host\n  user: db-user\n")
+
+        monkeypatch.setattr(sys, "argv", ["data_agent", "--config", str(config_path)])
+        monkeypatch.delenv("POSTGRESQL_DB_HOST", raising=False)
+        monkeypatch.delenv("POSTGRESQL_DB_USER", raising=False)
+        monkeypatch.delenv("POSTGRESQL_DB_PASSWORD", raising=False)
+
+        assert load_config()["postgresql_db"] == {"host": "db-host", "user": "db-user"}
+
+        monkeypatch.setenv("POSTGRESQL_DB_PASSWORD", "from-environment")
+
+        assert load_config()["postgresql_db"] == {"host": "db-host", "user": "db-user", "password": "from-environment"}

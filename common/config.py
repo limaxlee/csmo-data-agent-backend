@@ -17,6 +17,7 @@ _ENV_MAP = {
     "POSTGRESQL_DB_PORT": ("postgresql_db.port", int),
     "POSTGRESQL_DB_NAME": ("postgresql_db.name", str),
     "POSTGRESQL_DB_USER": ("postgresql_db.user", str),
+    "POSTGRESQL_DB_PASSWORD": ("postgresql_db.password", str),
     "OBJECT_STORAGE_BUCKET": ("object_storage.bucket", str),
     "OBJECT_STORAGE_ENDPOINT": ("object_storage.endpoint", str),
     "OBJECT_STORAGE_ACCESS_KEY": ("object_storage.access_key", str),
@@ -89,6 +90,7 @@ class SessionDBConfig(BaseModel):
     port: int
     name: str
     user: str
+    password: str = ""
 
 
 class ObjectStorageConfig(BaseModel):

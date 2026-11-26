@@ -1,0 +1,30 @@
+# Argo CD Application for the data agent in production.
+# Pasted into Argo CD by hand (guide, step D3). Argo CD does not read this
+# file from the repo; it is kept here so that the text is not lost.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: data-agent-prod
+  namespace: argocd
+  finalizers:
+    # Deleting this Application also deletes everything it created.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dice
+  source:
+    # The backend repo on the company GitHub. Replace YOUR-ORG with the owner.
+    repoURL: https://github.sec.samsung.net/YOUR-ORG/cosmo-data-agent-backend.git
+    # The one branch Argo CD reads. Deployment files count only on this branch.
+    targetRevision: main
+    path: deploy/argocd/charts/data-agent
+    helm:
+      releaseName: data-agent
+      valueFiles:
+        - ../../environments/production/data-agent.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dice
+  syncPolicy:
+    # No "automated" block: syncing is by hand.
+    syncOptions:
+      - CreateNamespace=false

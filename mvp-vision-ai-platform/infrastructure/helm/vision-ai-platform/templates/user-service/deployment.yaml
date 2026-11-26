@@ -1,0 +1,86 @@
+{{- if .Values.userService.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vision-ai.userService.fullname" . }}
+  labels:
+    {{- include "vision-ai.userService.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.userService.autoscaling.enabled }}
+  replicas: {{ .Values.userService.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "vision-ai.userService.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/user-service/configmap.yaml") . | sha256sum }}
+      {{- with .Values.userService.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "vision-ai.userService.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.userService.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vision-ai.userService.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.userService.podSecurityContext | nindent 8 }}
+      containers:
+        - name: user-service
+          securityContext:
+            {{- toYaml .Values.userService.securityContext | nindent 12 }}
+          image: "{{ .Values.userService.image.repository }}:{{ .Values.userService.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.userService.image.pullPolicy }}
+          {{- with .Values.userService.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.userService.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8003
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "vision-ai.userService.fullname" . }}-config
+          {{- if or .Values.userService.env .Values.userService.secretEnv }}
+          env:
+            {{- range $key, $value := .Values.userService.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- range .Values.userService.secretEnv }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .secretKey }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.userService.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.userService.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.userService.resources | nindent 12 }}
+      {{- with .Values.userService.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.userService.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.userService.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+
